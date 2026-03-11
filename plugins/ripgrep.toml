@@ -1,5 +1,15 @@
 [plugin]
 name = "ripgrep"
 alias = ["rg", "ripgrep"]
+description = "A fast line-oriented search tool that supports Unicode"
 location = "github:BurntSushi/ripgrep"
-binary = "rg"
+asset_pattern = "{name}-{version}-{target}.tar.gz"
+binary = "{name}-{version}-{target}/rg"
+man_pages = ["{name}-{version}-{target}/doc/rg.1"]
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"
+"windows-x86_64" = "x86_64-pc-windows-msvc"

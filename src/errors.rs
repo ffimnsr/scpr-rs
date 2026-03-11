@@ -1,3 +1,1 @@
-use std::error::Error;
-
-pub(crate) type GenericError = Box<dyn Error + Send + Sync>;
+// Error types are provided by `anyhow`; this module is kept for reference.
