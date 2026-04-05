@@ -4,6 +4,7 @@ alias = ["rg", "ripgrep"]
 description = "A fast line-oriented search tool that supports Unicode"
 location = "github:BurntSushi/ripgrep"
 asset_pattern = "{name}-{version}-{target}.tar.gz"
+checksum_asset_pattern = "{name}-{version}-{target}.tar.gz.sha256"
 binary = "{name}-{version}-{target}/rg"
 man_pages = ["{name}-{version}-{target}/doc/rg.1"]
 

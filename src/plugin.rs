@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use tracing::debug;
 use walkdir::{DirEntry, WalkDir};
 
@@ -37,6 +38,9 @@ pub struct Plugin {
     pub location: String,
     /// Asset filename pattern with template placeholders.
     pub asset_pattern: String,
+    /// Optional checksum asset filename pattern used when release metadata
+    /// does not expose an asset digest directly.
+    pub checksum_asset_pattern: Option<String>,
     /// Path to the binary within the extracted archive.
     pub binary: String,
     /// Paths to man pages within the extracted archive.
@@ -46,20 +50,10 @@ pub struct Plugin {
 }
 
 impl Plugin {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn alias(&self) -> &[String] {
-        &self.alias
-    }
-
     /// Parse the `github:<owner>/<repo>` location and return `(owner, repo)`.
     pub fn github_repo(&self) -> Option<(&str, &str)> {
         let loc = self.location.strip_prefix("github:")?;
-        let mut parts = loc.splitn(2, '/');
-        let owner = parts.next()?;
-        let repo = parts.next()?;
+        let (owner, repo) = loc.split_once('/')?;
         Some((owner, repo))
     }
 
@@ -90,8 +84,8 @@ struct PluginContainer {
 
 /// Parse a plugin TOML file and return the [`Plugin`].
 pub fn parse(path: &str) -> Result<Plugin> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read plugin file: {path}"))?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read plugin file: {path}"))?;
 
     debug!("Parsing plugin: {path}");
 
@@ -109,24 +103,43 @@ fn is_not_hidden(entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
-/// Load all plugins from a directory (non-recursive, `.toml` files only).
+/// Load all plugins from a directory (`.toml` files only, top-level entries).
 pub fn load_plugins_from_dir(dir: &str) -> Result<Vec<Plugin>> {
+    let dir_path = Path::new(dir);
+    if !dir_path.exists() {
+        debug!("Plugin directory does not exist, skipping: {dir}");
+        return Ok(Vec::new());
+    }
+
     let mut plugins = Vec::new();
 
-    for entry in WalkDir::new(dir)
-        .max_depth(2)
+    for entry in WalkDir::new(dir_path)
+        .max_depth(1)
         .into_iter()
-        .filter_entry(|e| is_not_hidden(e))
-        .filter_map(|e| e.ok())
-        .filter(|e| !e.file_type().is_dir())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext == "toml")
-                .unwrap_or(false)
-        })
+        .filter_entry(is_not_hidden)
     {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::warn!("Failed to read plugin entry in {dir}: {err}");
+                continue;
+            }
+        };
+
+        if entry.file_type().is_dir() {
+            continue;
+        }
+
+        if !entry
+            .path()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext == "toml")
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
         let filename = entry
             .path()
             .to_str()
@@ -146,16 +159,50 @@ pub fn load_plugins_from_dir(dir: &str) -> Result<Vec<Plugin>> {
 ///
 /// Directories are searched in order; the first match wins.
 pub fn find_plugin(name: &str, dirs: &[impl AsRef<str>]) -> Result<Plugin> {
+    for plugin in load_plugins_from_dirs(dirs)? {
+        if plugin.name == name || plugin.alias.iter().any(|a| a == name) {
+            if let Some(description) = plugin.description.as_deref() {
+                debug!("Matched plugin '{}': {description}", plugin.name);
+            }
+            return Ok(plugin);
+        }
+    }
+
+    Err(anyhow!(
+        "Plugin '{name}' not found in any plugins directory"
+    ))
+}
+
+/// Load plugins across one or more directories, deduplicated by plugin name.
+pub fn load_plugins_from_dirs(dirs: &[impl AsRef<str>]) -> Result<Vec<Plugin>> {
+    let mut load_errors = Vec::new();
+    let mut collected_plugins = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
     for dir in dirs {
-        if let Ok(plugins) = load_plugins_from_dir(dir.as_ref()) {
-            for plugin in plugins {
-                if plugin.name == name || plugin.alias.iter().any(|a| a == name) {
-                    return Ok(plugin);
+        match load_plugins_from_dir(dir.as_ref()) {
+            Ok(plugins) => {
+                for plugin in plugins {
+                    if seen.insert(plugin.name.clone()) {
+                        collected_plugins.push(plugin);
+                    }
                 }
+            }
+            Err(err) => {
+                load_errors.push(format!("{}: {err}", dir.as_ref()));
             }
         }
     }
-    Err(anyhow!("Plugin '{name}' not found in any plugins directory"))
+
+    if !load_errors.is_empty() {
+        return Err(anyhow!(
+            "Failed to read plugin directories: {}",
+            load_errors.join("; ")
+        ));
+    }
+
+    collected_plugins.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(collected_plugins)
 }
 
 #[cfg(test)]
@@ -171,6 +218,7 @@ mod tests {
         assert_eq!(plugin.location, "github:BurntSushi/ripgrep");
         assert!(plugin.binary.contains("rg"));
         assert!(plugin.description.is_some());
+        assert!(plugin.checksum_asset_pattern.is_some());
         assert!(plugin.targets.is_some());
     }
 
@@ -213,6 +261,20 @@ mod tests {
     }
 
     #[test]
+    fn test_expand_checksum_template() {
+        let plugin = parse("plugins/ripgrep.toml").unwrap();
+        let result = plugin.expand_template(
+            plugin.checksum_asset_pattern.as_deref().unwrap(),
+            "v14.1.0",
+            "x86_64-unknown-linux-musl",
+        );
+        assert_eq!(
+            result,
+            "ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz.sha256"
+        );
+    }
+
+    #[test]
     fn test_resolve_target_linux_x86_64() {
         let plugin = parse("plugins/ripgrep.toml").unwrap();
         let target = plugin.resolve_target("linux", "x86_64");
@@ -241,6 +303,12 @@ mod tests {
     }
 
     #[test]
+    fn test_load_plugins_from_missing_dir() {
+        let plugins = load_plugins_from_dir("plugins/does-not-exist").unwrap();
+        assert!(plugins.is_empty());
+    }
+
+    #[test]
     fn test_find_plugin_by_name() {
         let plugin = find_plugin("ripgrep", &["plugins"]).unwrap();
         assert_eq!(plugin.name, "ripgrep");
@@ -256,5 +324,15 @@ mod tests {
     fn test_find_plugin_not_found() {
         let result = find_plugin("nonexistent", &["plugins"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_plugins_from_dirs_deduplicates_by_name() {
+        let plugins = load_plugins_from_dirs(&["plugins", "plugins"]).unwrap();
+        let ripgrep_plugins = plugins
+            .iter()
+            .filter(|plugin| plugin.name == "ripgrep")
+            .count();
+        assert_eq!(ripgrep_plugins, 1);
     }
 }

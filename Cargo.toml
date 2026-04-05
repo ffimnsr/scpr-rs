@@ -1,5 +1,5 @@
 [package]
-name = "scarper"
+name = "scpr"
 version = "0.4.0"
 authors = ["Edward Fitz Abucay gh:@ffimnsr"]
 edition = "2024"
@@ -13,11 +13,12 @@ keywords = ["cli", "binary", "installer", "github", "pluggable"]
 exclude = [".gitignore"]
 
 [[bin]]
-name = "scarper"
+name = "scpr"
 path = "src/main.rs"
 
 [dependencies]
 clap = { version = "~4.5", features = ["string"] }
+clap_complete = "~4.5"
 tracing = "~0.1"
 tracing-subscriber = { version = "~0.3", features = ["tracing-log", "env-filter"] }
 serde = { version = "~1", features = ["derive"] }
@@ -31,17 +32,23 @@ dirs = "~6"
 flate2 = "~1"
 tar = "~0.4"
 zip = "~8"
+bzip2 = "~0.5"
+xz2 = "~0.1"
+zstd = "~0.13"
 indicatif = "~0.18"
 futures-util = "~0.3"
+sha2 = "~0.10"
+tempfile = "~3"
+chrono = { version = "~0.4", features = ["serde"] }
 
 [package.metadata.deb]
-name = "scarper"
+name = "scpr"
 maintainer = "Edward Fitz Abucay gh:@ffimnsr"
 section = "utility"
 assets = [
-  ["target/release/scarper", "usr/bin/", "755"],
-  ["COPYRIGHT", "usr/share/doc/scarper/", "644"],
-  ["LICENSE-MIT", "usr/share/doc/scarper/", "644"],
-  ["LICENSE-APACHE", "usr/share/doc/scarper/", "644"],
-  ["README.md", "usr/share/doc/scarper/README", "644"],
+  ["target/release/scpr", "usr/bin/", "755"],
+  ["COPYRIGHT", "usr/share/doc/scpr/", "644"],
+  ["LICENSE-MIT", "usr/share/doc/scpr/", "644"],
+  ["LICENSE-APACHE", "usr/share/doc/scpr/", "644"],
+  ["README.md", "usr/share/doc/scpr/README", "644"],
 ]
