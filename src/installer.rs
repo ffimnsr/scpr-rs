@@ -1,28 +1,20 @@
 use crate::{
     github::{GithubClient, ReleaseAsset},
+    installer_archive::{self, InstallPayload, InstalledPaths},
     plugin::Plugin,
     settings::AppSettings,
 };
 use anyhow::{Context, Result, anyhow};
-use bzip2::read::BzDecoder;
-use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
-    fs,
+    fs, io,
     io::ErrorKind,
-    io::{self, Cursor},
     ops::Drop,
-    path::{Component, Path, PathBuf},
-    process,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tar::Archive;
 use tempfile::NamedTempFile;
 use tracing::{debug, info, warn};
-use xz2::read::XzDecoder;
-use zstd::stream::read::Decoder as ZstdDecoder;
 
 const LOCK_RETRY_DELAY_MS: u64 = 100;
 const LOCK_RETRY_ATTEMPTS: usize = 100;
@@ -57,6 +49,14 @@ pub struct InstalledPackage {
 struct State {
     #[serde(default = "default_state_version")]
     version: u32,
+    #[serde(default)]
+    installed: Vec<InstalledPackage>,
+    #[serde(default)]
+    history: Vec<HistoryEvent>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LegacyStateV0 {
     #[serde(default)]
     installed: Vec<InstalledPackage>,
     #[serde(default)]
@@ -114,25 +114,6 @@ pub struct AuditRecord {
 }
 
 #[derive(Debug)]
-struct InstallPayload {
-    binary_filename: String,
-    binary_contents: Vec<u8>,
-    man_pages: Vec<(String, Vec<u8>)>,
-}
-
-#[derive(Debug)]
-struct InstalledPaths {
-    binary_filename: String,
-    man_page_filenames: Vec<String>,
-}
-
-struct StagedFile {
-    dest: PathBuf,
-    temp: NamedTempFile,
-    is_man_page: bool,
-}
-
-#[derive(Debug)]
 struct StateLock {
     path: PathBuf,
 }
@@ -186,17 +167,9 @@ impl Installer {
 
         let content =
             fs::read_to_string(&self.state_file).context("Failed to read state file")?;
-        let state: State =
+        let value: toml::Value =
             toml::from_str(&content).context("Failed to parse state file")?;
-        if state.version != STATE_VERSION {
-            return Err(anyhow!(
-                "Unsupported state file version {} in {}. Expected version {}.",
-                state.version,
-                self.state_file.display(),
-                STATE_VERSION
-            ));
-        }
-        Ok(state)
+        migrate_state_value(value, &self.state_file)
     }
 
     fn save_state(&self, state: &State) -> Result<()> {
@@ -334,44 +307,13 @@ impl Installer {
             .await?;
         self.verify_sha256(&data, &checksum_sha256)?;
 
-        let payload = if asset_name.ends_with(".tar.gz") || asset_name.ends_with(".tgz") {
-            self.extract_from_targz(&data, &binary_path, &man_paths)?
-        } else if asset_name.ends_with(".tar.xz") || asset_name.ends_with(".txz") {
-            self.extract_from_tar_xz(&data, &binary_path, &man_paths)?
-        } else if asset_name.ends_with(".tar.zst") || asset_name.ends_with(".tar.zstd") {
-            self.extract_from_tar_zst(&data, &binary_path, &man_paths)?
-        } else if asset_name.ends_with(".tar.bz2") || asset_name.ends_with(".tbz2") {
-            self.extract_from_tar_bz2(&data, &binary_path, &man_paths)?
-        } else if asset_name.ends_with(".zip") {
-            self.extract_from_zip(&data, &binary_path, &man_paths)?
-        } else if asset_name.ends_with(".gz") {
-            // Single gzip-compressed binary (not a tar archive).
-            let mut decoder = GzDecoder::new(Cursor::new(data));
-            let mut bytes = Vec::new();
-            io::Read::read_to_end(&mut decoder, &mut bytes)
-                .context("Failed to decompress .gz binary")?;
-            InstallPayload {
-                binary_filename: asset_name
-                    .strip_suffix(".gz")
-                    .and_then(|s| Path::new(s).file_name())
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&plugin.name)
-                    .to_string(),
-                binary_contents: bytes,
-                man_pages: Vec::new(),
-            }
-        } else {
-            // Assume a raw binary (no archive).
-            InstallPayload {
-                binary_filename: Path::new(&binary_path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(&plugin.name)
-                    .to_string(),
-                binary_contents: data,
-                man_pages: Vec::new(),
-            }
-        };
+        let payload = installer_archive::extract_install_payload(
+            &asset_name,
+            &data,
+            &binary_path,
+            &man_paths,
+            &plugin.name,
+        )?;
 
         if dry_run {
             println!(
@@ -575,169 +517,6 @@ impl Installer {
         }
     }
 
-    fn extract_from_targz(
-        &self,
-        data: &[u8],
-        binary_path: &str,
-        man_paths: &[String],
-    ) -> Result<InstallPayload> {
-        let gz = GzDecoder::new(Cursor::new(data));
-        let mut archive = Archive::new(gz);
-        self.extract_from_tar(archive.entries()?, binary_path, man_paths)
-    }
-
-    fn extract_from_tar_xz(
-        &self,
-        data: &[u8],
-        binary_path: &str,
-        man_paths: &[String],
-    ) -> Result<InstallPayload> {
-        let xz = XzDecoder::new(Cursor::new(data));
-        let mut archive = Archive::new(xz);
-        self.extract_from_tar(archive.entries()?, binary_path, man_paths)
-    }
-
-    fn extract_from_tar_zst(
-        &self,
-        data: &[u8],
-        binary_path: &str,
-        man_paths: &[String],
-    ) -> Result<InstallPayload> {
-        let zst =
-            ZstdDecoder::new(Cursor::new(data)).context("Failed to init zstd decoder")?;
-        let mut archive = Archive::new(zst);
-        self.extract_from_tar(archive.entries()?, binary_path, man_paths)
-    }
-
-    fn extract_from_tar_bz2(
-        &self,
-        data: &[u8],
-        binary_path: &str,
-        man_paths: &[String],
-    ) -> Result<InstallPayload> {
-        let bz = BzDecoder::new(Cursor::new(data));
-        let mut archive = Archive::new(bz);
-        self.extract_from_tar(archive.entries()?, binary_path, man_paths)
-    }
-
-    fn extract_from_tar<R: io::Read>(
-        &self,
-        entries: tar::Entries<'_, R>,
-        binary_path: &str,
-        man_paths: &[String],
-    ) -> Result<InstallPayload> {
-        let mut binary_filename = None;
-        let mut binary_contents = None;
-        let mut man_pages_left: HashSet<&str> =
-            man_paths.iter().map(String::as_str).collect();
-        let mut extracted_man_pages = Vec::new();
-
-        for entry in entries {
-            let mut entry = entry.context("Failed to read tar entry")?;
-            let path = entry.path().context("Failed to get tar entry path")?;
-            let path_str = path.to_string_lossy().to_string();
-
-            // Reject any entry that would escape the archive root via path traversal.
-            if has_path_traversal(&path) {
-                warn!("Skipping unsafe tar entry: {path_str}");
-                continue;
-            }
-
-            if binary_contents.is_none() && path_str == binary_path {
-                debug!("Extracting binary: {path_str}");
-                let filename = Path::new(&path_str)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .ok_or_else(|| anyhow!("Invalid binary path: {path_str}"))?
-                    .to_string();
-                let mut bytes = Vec::new();
-                io::Read::read_to_end(&mut entry, &mut bytes)
-                    .context("Failed to read binary from archive")?;
-                binary_filename = Some(filename);
-                binary_contents = Some(bytes);
-            } else if man_pages_left.contains(path_str.as_str()) {
-                let man_filename = Path::new(&path_str)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .ok_or_else(|| anyhow!("Invalid man page path: {path_str}"))?;
-                let mut bytes = Vec::new();
-                io::Read::read_to_end(&mut entry, &mut bytes)
-                    .context("Failed to read man page from archive")?;
-                extracted_man_pages.push((man_filename.to_string(), bytes));
-                man_pages_left.remove(path_str.as_str());
-            }
-
-            if binary_contents.is_some() && man_pages_left.is_empty() {
-                break;
-            }
-        }
-
-        if binary_contents.is_none() {
-            return Err(anyhow!("Binary '{binary_path}' not found in archive"));
-        }
-
-        for missing in &man_pages_left {
-            warn!("Man page '{missing}' not found in archive, skipping");
-        }
-
-        Ok(InstallPayload {
-            binary_filename: binary_filename.expect("binary filename set"),
-            binary_contents: binary_contents.expect("binary contents set"),
-            man_pages: extracted_man_pages,
-        })
-    }
-
-    fn extract_from_zip(
-        &self,
-        data: &[u8],
-        binary_path: &str,
-        man_paths: &[String],
-    ) -> Result<InstallPayload> {
-        let mut archive = zip::ZipArchive::new(Cursor::new(data))
-            .context("Failed to open zip archive")?;
-
-        let binary_filename;
-        let binary_contents;
-
-        {
-            let mut entry = archive.by_name(binary_path).with_context(|| {
-                format!("Binary '{binary_path}' not found in zip archive")
-            })?;
-            binary_filename = Path::new(binary_path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| anyhow!("Invalid binary path: {binary_path}"))?
-                .to_string();
-            let mut bytes = Vec::new();
-            io::Read::read_to_end(&mut entry, &mut bytes)
-                .context("Failed to read binary from zip archive")?;
-            binary_contents = bytes;
-        }
-
-        let mut extracted_man_pages = Vec::new();
-        for man_path in man_paths {
-            match archive.by_name(man_path) {
-                Ok(mut entry) => {
-                    let man_filename = Path::new(man_path)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .ok_or_else(|| anyhow!("Invalid man page path: {man_path}"))?;
-                    let mut bytes = Vec::new();
-                    io::Read::read_to_end(&mut entry, &mut bytes)
-                        .context("Failed to read man page from zip archive")?;
-                    extracted_man_pages.push((man_filename.to_string(), bytes));
-                }
-                Err(_) => warn!("Man page '{man_path}' not found in archive, skipping"),
-            }
-        }
-
-        Ok(InstallPayload {
-            binary_filename,
-            binary_contents,
-            man_pages: extracted_man_pages,
-        })
-    }
-
     async fn resolve_expected_sha256(
         &self,
         plugin: &Plugin,
@@ -747,112 +526,18 @@ impl Installer {
         tag: &str,
         target: &str,
     ) -> Result<String> {
-        if let Some(digest) = asset.digest.as_deref() {
-            return parse_sha256_digest(digest);
-        }
-
-        let checksum_pattern =
-            plugin.checksum_asset_pattern.as_deref().ok_or_else(|| {
-                anyhow!(
-                    "No SHA-256 metadata configured for plugin '{}'",
-                    plugin.name
-                )
-            })?;
-        let checksum_name = plugin.expand_template(checksum_pattern, tag, target);
-        let checksum_asset = assets
-            .iter()
-            .find(|candidate| candidate.name == checksum_name)
-            .ok_or_else(|| {
-                anyhow!(
-                    "Checksum asset '{checksum_name}' not found for plugin '{}'",
-                    plugin.name
-                )
-            })?;
-
-        info!("Downloading checksum {}…", checksum_asset.name);
-        let checksum_data = client
-            .download_asset(&checksum_asset.browser_download_url, checksum_asset.size)
-            .await?;
-        let checksum_text = String::from_utf8(checksum_data)
-            .context("Checksum asset is not valid UTF-8 text")?;
-        parse_sha256_checksum_file(&checksum_text, &asset.name)
+        installer_archive::resolve_expected_sha256(
+            plugin, client, assets, asset, tag, target,
+        )
+        .await
     }
 
     fn verify_sha256(&self, data: &[u8], expected_sha256: &str) -> Result<()> {
-        let actual = sha256_hex(data);
-        if actual != expected_sha256 {
-            return Err(anyhow!(
-                "SHA-256 mismatch: expected {expected_sha256}, got {actual}"
-            ));
-        }
-        info!("Verified SHA-256: {actual}");
-        Ok(())
+        installer_archive::verify_sha256(data, expected_sha256)
     }
 
     fn commit_install(&self, payload: InstallPayload) -> Result<InstalledPaths> {
-        fs::create_dir_all(&self.local_bin)
-            .with_context(|| format!("Failed to create {}", self.local_bin.display()))?;
-        fs::create_dir_all(&self.local_man)
-            .with_context(|| format!("Failed to create {}", self.local_man.display()))?;
-
-        let mut staged = Vec::new();
-        let binary_dest = self.local_bin.join(&payload.binary_filename);
-        staged.push(stage_file(
-            &self.local_bin,
-            &binary_dest,
-            &payload.binary_contents,
-            true,
-        )?);
-
-        let mut man_page_filenames = Vec::new();
-        for (filename, contents) in payload.man_pages {
-            let dest = self.local_man.join(&filename);
-            staged.push(stage_file(&self.local_man, &dest, &contents, false)?);
-            man_page_filenames.push(filename);
-        }
-
-        let mut backups = Vec::new();
-        for staged_file in &staged {
-            if staged_file.dest.exists() {
-                let backup = unique_backup_path(&staged_file.dest);
-                fs::rename(&staged_file.dest, &backup).with_context(|| {
-                    format!(
-                        "Failed to move {} to backup location {}",
-                        staged_file.dest.display(),
-                        backup.display()
-                    )
-                })?;
-                backups.push((staged_file.dest.clone(), backup));
-            }
-        }
-
-        let mut committed_paths = Vec::new();
-        for staged_file in staged {
-            match staged_file.temp.persist(&staged_file.dest) {
-                Ok(_) => {
-                    committed_paths.push(staged_file.dest.clone());
-                    if staged_file.is_man_page {
-                        info!("Installed man page → {}", staged_file.dest.display());
-                    }
-                }
-                Err(err) => {
-                    restore_backups(&backups)?;
-                    cleanup_paths(&committed_paths);
-                    return Err(anyhow!(
-                        "Failed to replace {}: {}",
-                        staged_file.dest.display(),
-                        err.error
-                    ));
-                }
-            }
-        }
-
-        cleanup_backup_files(backups);
-
-        Ok(InstalledPaths {
-            binary_filename: payload.binary_filename,
-            man_page_filenames,
-        })
+        installer_archive::commit_install(&self.local_bin, &self.local_man, payload)
     }
 
     /// Mark an installed package as pinned so `update --all` will skip it.
@@ -936,7 +621,7 @@ impl Installer {
             let data = fs::read(&binary_path).with_context(|| {
                 format!("Failed to read installed binary {}", binary_path.display())
             })?;
-            let actual = sha256_hex(&data);
+            let actual = installer_archive::sha256_hex(&data);
             if actual == expected {
                 records.push(AuditRecord {
                     package: pkg.name,
@@ -1030,17 +715,6 @@ impl Installer {
     }
 }
 
-/// Return `true` if `path` contains any component that would escape the
-/// archive root (absolute prefix, `..`, etc.).
-fn has_path_traversal(path: &Path) -> bool {
-    path.components().any(|c| {
-        matches!(
-            c,
-            Component::RootDir | Component::Prefix(_) | Component::ParentDir
-        )
-    })
-}
-
 fn current_unix_timestamp() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1052,136 +726,32 @@ fn default_state_version() -> u32 {
     STATE_VERSION
 }
 
-fn parse_sha256_digest(digest: &str) -> Result<String> {
-    let normalized = digest
-        .strip_prefix("sha256:")
-        .unwrap_or(digest)
-        .trim()
-        .to_ascii_lowercase();
-    validate_sha256_hex(&normalized)?;
-    Ok(normalized)
+fn migrate_state_value(value: toml::Value, path: &Path) -> Result<State> {
+    let version = value
+        .get("version")
+        .and_then(toml::Value::as_integer)
+        .unwrap_or(0);
+
+    match version {
+        0 => migrate_state_v0(value),
+        1 => toml::Value::try_into(value).context("Failed to parse state file"),
+        other => Err(anyhow!(
+            "Unsupported state file version {} in {}. Supported versions: 0, {}.",
+            other,
+            path.display(),
+            STATE_VERSION
+        )),
+    }
 }
 
-fn parse_sha256_checksum_file(contents: &str, asset_name: &str) -> Result<String> {
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if !line.contains(char::is_whitespace) {
-            return parse_sha256_digest(line);
-        }
-
-        let mut parts = line.split_whitespace();
-        let checksum = parts.next().unwrap_or_default();
-        let filename = parts.next().unwrap_or_default().trim_start_matches('*');
-        if filename == asset_name {
-            return parse_sha256_digest(checksum);
-        }
-    }
-
-    Err(anyhow!(
-        "Checksum file does not contain an entry for asset '{asset_name}'"
-    ))
-}
-
-fn validate_sha256_hex(value: &str) -> Result<()> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(anyhow!("Invalid SHA-256 digest: {value}"));
-    }
-    Ok(())
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        output.push_str(&format!("{byte:02x}"));
-    }
-    output
-}
-
-fn stage_file(
-    dest_dir: &Path,
-    dest: &Path,
-    contents: &[u8],
-    executable: bool,
-) -> Result<StagedFile> {
-    let mut temp = NamedTempFile::new_in(dest_dir).with_context(|| {
-        format!("Failed to create temp file in {}", dest_dir.display())
-    })?;
-    io::Write::write_all(&mut temp, contents)
-        .with_context(|| format!("Failed to write staged file for {}", dest.display()))?;
-
-    #[cfg(unix)]
-    if executable {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = temp
-            .as_file()
-            .metadata()
-            .with_context(|| {
-                format!("Failed to stat staged file for {}", dest.display())
-            })?
-            .permissions();
-        perms.set_mode(0o755);
-        temp.as_file().set_permissions(perms).with_context(|| {
-            format!("Failed to set permissions on {}", dest.display())
-        })?;
-    }
-
-    Ok(StagedFile {
-        dest: dest.to_path_buf(),
-        temp,
-        is_man_page: !executable,
+fn migrate_state_v0(value: toml::Value) -> Result<State> {
+    let legacy: LegacyStateV0 =
+        toml::Value::try_into(value).context("Failed to parse legacy v0 state file")?;
+    Ok(State {
+        version: STATE_VERSION,
+        installed: legacy.installed,
+        history: legacy.history,
     })
-}
-
-fn unique_backup_path(dest: &Path) -> PathBuf {
-    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-    let filename = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("scpr-backup");
-
-    for counter in 0..1000 {
-        let candidate =
-            parent.join(format!("{filename}.scpr-old.{}.{}", process::id(), counter));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-
-    parent.join(format!("{filename}.scpr-old.{}", process::id()))
-}
-
-fn cleanup_backup_files(backups: Vec<(PathBuf, PathBuf)>) {
-    for (_, backup) in backups {
-        if backup.exists() {
-            let _ = fs::remove_file(backup);
-        }
-    }
-}
-
-fn restore_backups(backups: &[(PathBuf, PathBuf)]) -> Result<()> {
-    for (dest, backup) in backups.iter().rev() {
-        if backup.exists() {
-            fs::rename(backup, dest).with_context(|| {
-                format!(
-                    "Failed to restore backup from {} to {}",
-                    backup.display(),
-                    dest.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
-fn cleanup_paths(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = fs::remove_file(path);
-    }
 }
 
 impl Drop for StateLock {
@@ -1193,390 +763,5 @@ impl Drop for StateLock {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        AuditStatus, HistoryAction, InstallPayload, InstalledPackage, Installer,
-        STATE_VERSION, State, StateFormat, parse_sha256_checksum_file,
-        parse_sha256_digest,
-    };
-    use crate::plugin::Plugin;
-    use std::path::PathBuf;
-
-    fn temp_installer() -> Installer {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let root = temp_dir.keep();
-        let local_bin = root.join("bin");
-        let local_man = root.join("man");
-        let state_dir = root.join("state");
-        std::fs::create_dir_all(&local_bin).unwrap();
-        std::fs::create_dir_all(&local_man).unwrap();
-        std::fs::create_dir_all(&state_dir).unwrap();
-        Installer {
-            local_bin,
-            local_man,
-            state_file: state_dir.join("state.toml"),
-        }
-    }
-
-    fn sample_plugin() -> Plugin {
-        Plugin {
-            name: "ripgrep".to_string(),
-            alias: vec!["rg".to_string()],
-            description: Some("sample".to_string()),
-            location: "github:BurntSushi/ripgrep".to_string(),
-            asset_pattern: "{name}-{version}-{target}.tar.gz".to_string(),
-            checksum_asset_pattern: Some(
-                "{name}-{version}-{target}.tar.gz.sha256".to_string(),
-            ),
-            binary: "{name}-{version}-{target}/rg".to_string(),
-            man_pages: Some(vec!["{name}-{version}-{target}/doc/rg.1".to_string()]),
-            targets: None,
-        }
-    }
-
-    #[test]
-    fn test_parse_sha256_digest_accepts_prefixed_value() {
-        let value = parse_sha256_digest(
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .unwrap();
-        assert_eq!(
-            value,
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        );
-    }
-
-    #[test]
-    fn test_parse_sha256_checksum_file_matches_asset_name() {
-        let checksum = parse_sha256_checksum_file(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  ripgrep.tar.gz",
-            "ripgrep.tar.gz",
-        )
-        .unwrap();
-        assert_eq!(
-            checksum,
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        );
-    }
-
-    #[test]
-    fn test_parse_sha256_checksum_file_accepts_single_value() {
-        let checksum = parse_sha256_checksum_file(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            "ignored",
-        )
-        .unwrap();
-        assert_eq!(
-            checksum,
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_acquire_state_lock_blocks_when_lock_exists() {
-        let installer = temp_installer();
-        let lock_path = installer.state_file_path().with_extension("lock");
-        std::fs::write(&lock_path, b"busy").unwrap();
-
-        let error = installer.acquire_state_lock().await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Timed out waiting for installer lock")
-        );
-
-        std::fs::remove_file(lock_path).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_acquire_state_lock_clears_stale_lock() {
-        let installer = temp_installer();
-        let lock_path = installer.state_file_path().with_extension("lock");
-        std::fs::write(&lock_path, b"stale").unwrap();
-        std::process::Command::new("touch")
-            .arg("-d")
-            .arg("2 minutes ago")
-            .arg(&lock_path)
-            .status()
-            .unwrap();
-
-        let _lock = installer.acquire_state_lock().await.unwrap();
-        assert!(lock_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_state_lock_removed_on_drop() {
-        let installer = temp_installer();
-        let lock_path: PathBuf = installer.state_file_path().with_extension("lock");
-
-        {
-            let _lock = installer.acquire_state_lock().await.unwrap();
-            assert!(lock_path.exists());
-        }
-
-        assert!(!lock_path.exists());
-    }
-
-    #[test]
-    fn test_commit_install_writes_binary_and_man_page() {
-        let installer = temp_installer();
-        let payload = InstallPayload {
-            binary_filename: "rg".to_string(),
-            binary_contents: b"binary".to_vec(),
-            man_pages: vec![("rg.1".to_string(), b"manual".to_vec())],
-        };
-
-        let installed = installer.commit_install(payload).unwrap();
-
-        assert_eq!(installed.binary_filename, "rg");
-        assert_eq!(installed.man_page_filenames, vec!["rg.1".to_string()]);
-        assert_eq!(
-            std::fs::read(installer.local_bin_dir().join("rg")).unwrap(),
-            b"binary"
-        );
-        assert_eq!(
-            std::fs::read(installer.local_man_dir().join("rg.1")).unwrap(),
-            b"manual"
-        );
-    }
-
-    #[test]
-    fn test_uninstall_removes_tracked_files_and_state() {
-        let installer = temp_installer();
-        let plugin = sample_plugin();
-        let binary_path = installer.local_bin_dir().join("rg");
-        let man_path = installer.local_man_dir().join("rg.1");
-
-        std::fs::write(&binary_path, b"binary").unwrap();
-        std::fs::write(&man_path, b"manual").unwrap();
-        installer
-            .save_state(&State {
-                version: STATE_VERSION,
-                installed: vec![InstalledPackage {
-                    name: "ripgrep".to_string(),
-                    version: "v15.1.0".to_string(),
-                    binary: "rg".to_string(),
-                    source: Some("github:BurntSushi/ripgrep".to_string()),
-                    target: Some("x86_64-unknown-linux-musl".to_string()),
-                    asset_name: Some(
-                        "ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz".to_string(),
-                    ),
-                    checksum_sha256: Some("a".repeat(64)),
-                    man_pages: vec!["rg.1".to_string()],
-                    installed_at_unix: Some(1),
-                    pinned: false,
-                }],
-                history: Vec::new(),
-            })
-            .unwrap();
-
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(installer.uninstall(&plugin, false))
-            .unwrap();
-
-        assert!(!binary_path.exists());
-        assert!(!man_path.exists());
-        assert!(installer.list_installed().unwrap().is_empty());
-        let history = installer.history(Some("ripgrep")).unwrap();
-        assert!(matches!(
-            history.last().unwrap().action,
-            HistoryAction::Removed
-        ));
-    }
-
-    #[test]
-    fn test_audit_detects_modified_binary() {
-        let installer = temp_installer();
-        let binary_path = installer.local_bin_dir().join("rg");
-        std::fs::write(&binary_path, b"modified").unwrap();
-        installer
-            .save_state(&State {
-                version: STATE_VERSION,
-                installed: vec![InstalledPackage {
-                    name: "ripgrep".to_string(),
-                    version: "v15.1.0".to_string(),
-                    binary: "rg".to_string(),
-                    source: None,
-                    target: None,
-                    asset_name: None,
-                    checksum_sha256: Some("a".repeat(64)),
-                    man_pages: Vec::new(),
-                    installed_at_unix: Some(1),
-                    pinned: false,
-                }],
-                history: Vec::new(),
-            })
-            .unwrap();
-
-        let audit = installer.audit().unwrap();
-        assert_eq!(audit.len(), 1);
-        assert!(matches!(audit[0].status, AuditStatus::Modified));
-    }
-
-    #[test]
-    fn test_pin_records_history() {
-        let installer = temp_installer();
-        installer
-            .save_state(&State {
-                version: STATE_VERSION,
-                installed: vec![InstalledPackage {
-                    name: "ripgrep".to_string(),
-                    version: "v15.1.0".to_string(),
-                    binary: "rg".to_string(),
-                    source: None,
-                    target: None,
-                    asset_name: None,
-                    checksum_sha256: Some("a".repeat(64)),
-                    man_pages: Vec::new(),
-                    installed_at_unix: Some(1),
-                    pinned: false,
-                }],
-                history: Vec::new(),
-            })
-            .unwrap();
-
-        installer.pin("ripgrep").unwrap();
-        let history = installer.history(Some("ripgrep")).unwrap();
-        assert!(matches!(
-            history.last().unwrap().action,
-            HistoryAction::Pinned
-        ));
-    }
-
-    #[test]
-    fn test_history_limited_returns_most_recent_events() {
-        let installer = temp_installer();
-        installer
-            .save_state(&State {
-                version: STATE_VERSION,
-                installed: Vec::new(),
-                history: vec![
-                    super::HistoryEvent {
-                        package: "ripgrep".to_string(),
-                        action: HistoryAction::Installed,
-                        timestamp_unix: 1,
-                        version: Some("v1".to_string()),
-                        from_version: None,
-                        to_version: Some("v1".to_string()),
-                        detail: None,
-                    },
-                    super::HistoryEvent {
-                        package: "ripgrep".to_string(),
-                        action: HistoryAction::Updated,
-                        timestamp_unix: 2,
-                        version: Some("v2".to_string()),
-                        from_version: Some("v1".to_string()),
-                        to_version: Some("v2".to_string()),
-                        detail: None,
-                    },
-                    super::HistoryEvent {
-                        package: "ripgrep".to_string(),
-                        action: HistoryAction::Removed,
-                        timestamp_unix: 3,
-                        version: Some("v2".to_string()),
-                        from_version: Some("v2".to_string()),
-                        to_version: None,
-                        detail: None,
-                    },
-                ],
-            })
-            .unwrap();
-
-        let history = installer.history_limited(Some("ripgrep"), Some(2)).unwrap();
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].timestamp_unix, 2);
-        assert_eq!(history[1].timestamp_unix, 3);
-    }
-
-    #[test]
-    fn test_export_and_restore_state_json_round_trip() {
-        let installer = temp_installer();
-        installer
-            .save_state(&State {
-                version: STATE_VERSION,
-                installed: vec![InstalledPackage {
-                    name: "ripgrep".to_string(),
-                    version: "v15.1.0".to_string(),
-                    binary: "rg".to_string(),
-                    source: None,
-                    target: None,
-                    asset_name: None,
-                    checksum_sha256: Some("a".repeat(64)),
-                    man_pages: Vec::new(),
-                    installed_at_unix: Some(1),
-                    pinned: false,
-                }],
-                history: Vec::new(),
-            })
-            .unwrap();
-
-        let exported = installer.export_state(StateFormat::Json).unwrap();
-
-        let restored = temp_installer();
-        restored
-            .restore_state(&exported, StateFormat::Json)
-            .unwrap();
-        let installed = restored.list_installed().unwrap();
-        assert_eq!(installed.len(), 1);
-        assert_eq!(installed[0].name, "ripgrep");
-    }
-
-    #[test]
-    fn test_exported_state_includes_schema_version() {
-        let installer = temp_installer();
-        let exported = installer.export_state(StateFormat::Toml).unwrap();
-        assert!(exported.contains(&format!("version = {}", STATE_VERSION)));
-    }
-
-    #[test]
-    fn test_load_state_rejects_unsupported_schema_version() {
-        let installer = temp_installer();
-        std::fs::write(
-            installer.state_file_path(),
-            "version = 99\ninstalled = []\nhistory = []\n",
-        )
-        .unwrap();
-
-        let error = installer.list_installed().unwrap_err();
-        assert!(error.to_string().contains("Unsupported state file version"));
-    }
-
-    #[test]
-    fn test_clear_history_removes_matching_events() {
-        let installer = temp_installer();
-        installer
-            .save_state(&State {
-                version: STATE_VERSION,
-                installed: Vec::new(),
-                history: vec![
-                    super::HistoryEvent {
-                        package: "ripgrep".to_string(),
-                        action: HistoryAction::Installed,
-                        timestamp_unix: 1,
-                        version: Some("v1".to_string()),
-                        from_version: None,
-                        to_version: Some("v1".to_string()),
-                        detail: None,
-                    },
-                    super::HistoryEvent {
-                        package: "fd".to_string(),
-                        action: HistoryAction::Installed,
-                        timestamp_unix: 2,
-                        version: Some("v1".to_string()),
-                        from_version: None,
-                        to_version: Some("v1".to_string()),
-                        detail: None,
-                    },
-                ],
-            })
-            .unwrap();
-
-        let removed = installer.clear_history(Some("ripgrep")).unwrap();
-        assert_eq!(removed, 1);
-        let history = installer.history(None).unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].package, "fd");
-    }
-}
+#[path = "installer_tests.rs"]
+mod tests;

@@ -1,0 +1,15 @@
+[plugin]
+name = "starship"
+alias = ["starship"]
+description = "The minimal, blazing-fast, and infinitely customizable prompt"
+location = "github:starship/starship"
+asset_pattern = "starship-{target}.tar.gz"
+checksum_asset_pattern = "starship-{target}.tar.gz.sha256"
+binary = "starship"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"

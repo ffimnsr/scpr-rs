@@ -194,8 +194,8 @@ pub fn load_plugins_from_dirs(dirs: &[impl AsRef<str>]) -> Result<Vec<Plugin>> {
             Ok(plugins) => {
                 for plugin in plugins {
                     if let Some(previous_dir) = seen.get(&plugin.name) {
-                        tracing::warn!(
-                            "Plugin '{}' from '{}' is shadowed by earlier plugin directory '{}'",
+                        eprintln!(
+                            "warning: plugin '{}' from '{}' is shadowed by earlier plugin directory '{}'",
                             plugin.name,
                             dir.as_ref(),
                             previous_dir
@@ -246,6 +246,14 @@ mod tests {
         let (owner, repo) = plugin.github_repo().unwrap();
         assert_eq!(owner, "BurntSushi");
         assert_eq!(repo, "ripgrep");
+    }
+
+    #[test]
+    fn test_parse_all_bundled_plugins() {
+        let plugins = load_plugins_from_dir("plugins").unwrap();
+        assert!(plugins.iter().any(|plugin| plugin.name == "ripgrep"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "fd"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "jq"));
     }
 
     #[test]

@@ -1,0 +1,11 @@
+[plugin]
+name = "eza"
+alias = ["eza"]
+description = "A modern, maintained replacement for ls"
+location = "github:eza-community/eza"
+asset_pattern = "eza_{target}.tar.gz"
+binary = "./eza"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"

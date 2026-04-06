@@ -20,6 +20,7 @@ pub struct Release {
 #[derive(Debug, Deserialize)]
 pub struct RepoMetadata {
     pub default_branch: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

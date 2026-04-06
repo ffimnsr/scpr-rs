@@ -1,0 +1,15 @@
+[plugin]
+name = "jq"
+alias = ["jq"]
+description = "A lightweight and flexible command-line JSON processor"
+location = "github:jqlang/jq"
+asset_pattern = "jq-{target}"
+checksum_asset_pattern = "sha256sum.txt"
+binary = "jq"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "linux64"
+"linux-aarch64" = "linux-arm64"
+"macos-x86_64" = "macos-amd64"
+"macos-aarch64" = "macos-arm64"

@@ -1,0 +1,13 @@
+[plugin]
+name = "hyperfine"
+alias = ["hyperfine"]
+description = "A command-line benchmarking tool"
+location = "github:sharkdp/hyperfine"
+asset_pattern = "hyperfine-v{version}-{target}.tar.gz"
+binary = "hyperfine-v{version}-{target}/hyperfine"
+man_pages = ["hyperfine-v{version}-{target}/hyperfine.1"]
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"

@@ -1,0 +1,13 @@
+[plugin]
+name = "midas"
+alias = ["midas"]
+description = "A schema migration tool for PostgreSQL, MySQL, SQLite, and more"
+location = "github:ffimnsr/midas-rs"
+asset_pattern = "midas-{version}-{target}.tar.gz"
+checksum_asset_pattern = "midas-{version}-{target}.tar.gz.sha256"
+binary = "midas-{version}-{target}/midas"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"

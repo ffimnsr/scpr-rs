@@ -1,12 +1,16 @@
 use crate::{github::GithubClient, settings::AppSettings};
 use anyhow::{Context, Result, anyhow};
+use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tempfile::NamedTempFile;
 use tracing::warn;
+
+const INDEX_SYNC_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemotePluginIndex {
@@ -137,14 +141,36 @@ impl RemoteIndexManager {
         client: &GithubClient,
     ) -> Result<Vec<RemotePluginIndex>> {
         let mut config = self.load_config()?;
-        let mut synced = Vec::new();
+        let client = client.clone();
+        let results = stream::iter(
+            config
+                .indexes
+                .iter()
+                .filter(|index| index.enabled)
+                .cloned()
+                .map(|mut index| {
+                    let client = client.clone();
+                    async move {
+                        self.sync_index(&client, &mut index).await?;
+                        Ok::<RemotePluginIndex, anyhow::Error>(index)
+                    }
+                }),
+        )
+        .buffer_unordered(INDEX_SYNC_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
 
-        for index in &mut config.indexes {
-            if !index.enabled {
-                continue;
+        let mut synced = Vec::new();
+        for result in results {
+            let synced_index = result?;
+            if let Some(index) = config
+                .indexes
+                .iter_mut()
+                .find(|index| index.repo == synced_index.repo)
+            {
+                *index = synced_index.clone();
             }
-            self.sync_index(client, index).await?;
-            synced.push(index.clone());
+            synced.push(synced_index);
         }
 
         self.save_config(&config)?;
@@ -289,8 +315,23 @@ impl RemoteIndexManager {
     fn save_config(&self, config: &RemoteIndexConfig) -> Result<()> {
         let content =
             toml::to_string(config).context("Failed to serialize remote index config")?;
-        fs::write(&self.config_file, content)
-            .with_context(|| format!("Failed to write {}", self.config_file.display()))
+        let config_dir = self
+            .config_file
+            .parent()
+            .context("Remote index config has no parent directory")?;
+        let mut temp = NamedTempFile::new_in(config_dir).with_context(|| {
+            format!("Failed to create temp file in {}", config_dir.display())
+        })?;
+        std::io::Write::write_all(&mut temp, content.as_bytes())
+            .context("Failed to write staged remote index config")?;
+        temp.persist(&self.config_file).map_err(|err| {
+            anyhow!(
+                "Failed to replace remote index config {}: {}",
+                self.config_file.display(),
+                err.error
+            )
+        })?;
+        Ok(())
     }
 
     async fn sync_index(

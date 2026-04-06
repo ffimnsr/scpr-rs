@@ -1,0 +1,14 @@
+[plugin]
+name = "zoxide"
+alias = ["z", "zoxide"]
+description = "A smarter cd command that learns your habits"
+location = "github:ajeetdsouza/zoxide"
+asset_pattern = "zoxide-{version}-{target}.tar.gz"
+binary = "zoxide"
+man_pages = ["man/man1/zoxide.1"]
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"

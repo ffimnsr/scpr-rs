@@ -1,0 +1,14 @@
+[plugin]
+name = "fd"
+alias = ["fd"]
+description = "A simple, fast, and user-friendly alternative to find"
+location = "github:sharkdp/fd"
+asset_pattern = "fd-v{version}-{target}.tar.gz"
+binary = "fd-v{version}-{target}/fd"
+man_pages = ["fd-v{version}-{target}/fd.1"]
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"

@@ -1,0 +1,13 @@
+[plugin]
+name = "mk"
+alias = ["mk"]
+description = "A markdown-based task runner for local project automation"
+location = "github:ffimnsr/mk-rs"
+asset_pattern = "mk-{version}-{target}.tar.gz"
+checksum_asset_pattern = "mk-{version}-{target}.tar.gz.sha256"
+binary = "mk-{version}-{target}/mk"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"

@@ -1,0 +1,15 @@
+[plugin]
+name = "fzf"
+alias = ["fzf"]
+description = "A command-line fuzzy finder"
+location = "github:junegunn/fzf"
+asset_pattern = "fzf-{version}-{target}.tar.gz"
+checksum_asset_pattern = "fzf_{version}_checksums.txt"
+binary = "fzf"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "linux_amd64"
+"linux-aarch64" = "linux_arm64"
+"macos-x86_64" = "darwin_amd64"
+"macos-aarch64" = "darwin_arm64"

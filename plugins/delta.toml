@@ -1,0 +1,13 @@
+[plugin]
+name = "delta"
+alias = ["delta", "git-delta"]
+description = "A syntax-highlighting pager for git, diff, grep, and blame output"
+location = "github:dandavison/delta"
+asset_pattern = "delta-{version}-{target}.tar.gz"
+binary = "delta-{version}-{target}/delta"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"

@@ -1,0 +1,14 @@
+[plugin]
+name = "bat"
+alias = ["bat"]
+description = "A cat clone with syntax highlighting and Git integration"
+location = "github:sharkdp/bat"
+asset_pattern = "bat-v{version}-{target}.tar.gz"
+binary = "bat-v{version}-{target}/bat"
+man_pages = ["bat-v{version}-{target}/bat.1"]
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"

@@ -14,6 +14,23 @@ It is built for tools like `ripgrep`, `fd`, or other projects that ship release 
 - supports updates, pinning, audit, and history
 - aims to stay friendly in day-to-day terminal use
 
+Bundled plugins currently include:
+
+- `ripgrep`
+- `fd`
+- `bat`
+- `delta`
+- `eza`
+- `zoxide`
+- `starship`
+- `fzf`
+- `skim`
+- `hyperfine`
+- `jq`
+- `lsd`
+- `mk`
+- `midas`
+
 ## Quick Start
 
 Install `scpr` with the official script:
@@ -114,7 +131,7 @@ Update everything except pinned packages:
 scpr update --all
 ```
 
-`update --all` runs upgrades with bounded parallelism, so bulk updates complete much faster than a fully sequential pass.
+`update --all` runs upgrades with bounded parallelism, shows overall `N / total` progress as packages finish, and ends with a success/failure summary.
 
 Preview changes without writing anything:
 
@@ -229,6 +246,16 @@ Inspect a plugin definition:
 scpr plugins info ripgrep
 ```
 
+Generate a best-effort plugin skeleton from a GitHub repo:
+
+```bash
+scpr plugins new sharkdp/fd
+scpr plugins new yourname/yourtool --stdout
+scpr plugins new owner/repo --output ./plugins/yourtool.toml
+```
+
+`plugins new` inspects the latest GitHub release and writes a starter TOML. It is intentionally best-effort, so review the generated asset pattern, binary path, checksum source, and target mappings before committing it.
+
 Manage remote GitHub-backed plugin indexes:
 
 ```bash
@@ -329,6 +356,8 @@ Check local setup:
 ```bash
 scpr doctor
 ```
+
+`doctor` reports the problem and suggests a fix when it finds issues like a missing `PATH` entry, missing man-page search path, unreadable plugin directories, or recorded files that have drifted from local state.
 
 Adjust CLI verbosity without setting `RUST_LOG` manually:
 

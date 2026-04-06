@@ -1,0 +1,14 @@
+[plugin]
+name = "lsd"
+alias = ["lsd"]
+description = "A modern ls with colors, icons, tree view, and more"
+location = "github:lsd-rs/lsd"
+asset_pattern = "lsd-v{version}-{target}.tar.gz"
+binary = "lsd-v{version}-{target}/lsd"
+man_pages = ["lsd-v{version}-{target}/lsd.1"]
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"
