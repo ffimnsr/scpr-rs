@@ -37,14 +37,14 @@ Bundled plugins currently include:
 Install `scpr` with the official script:
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh | sh
+curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/master/install.sh | sh
 ```
 
 If you want to verify the bootstrap script before running it:
 
 ```sh
-curl -sSfLO https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh
-curl -sSfLO https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh.sha256
+curl -sSfLO https://raw.githubusercontent.com/ffimnsr/scpr-rs/master/install.sh
+curl -sSfLO https://raw.githubusercontent.com/ffimnsr/scpr-rs/master/install.sh.sha256
 sha256sum -c install.sh.sha256
 sh install.sh
 ```
@@ -83,14 +83,14 @@ The installer downloads the latest GitHub release for your platform, extracts it
 Recommended command:
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh | sh
+curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/master/install.sh | sh
 ```
 
 Helpful installer options:
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh | sh -s -- --bin-dir ~/.local/bin
-curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh | sh -s -- --arch x86_64-unknown-linux-musl
+curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/master/install.sh | sh -s -- --bin-dir ~/.local/bin
+curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/master/install.sh | sh -s -- --arch x86_64-unknown-linux-musl
 ```
 
 ### Install from Cargo
@@ -315,7 +315,6 @@ Configuration sources:
 - `--plugins-dir /path/to/plugins` for one-off overrides
 - `SCPR_PLUGINS_DIR` with standard path separators for extra plugin directories
 - `SCPR_BIN_DIR` to override the binary install directory
-- `~/.config/scpr/config.toml` for persistent settings such as `install_dir`, `man_dir`, `plugin_dirs`, and `index_ttl_secs`
 - `~/.config/scpr/config.toml` for persistent settings such as `install_dir`, `man_dir`, `plugin_dirs`, `index_ttl_secs`, and `lock_stale_after_secs`
 
 Remote index notes:
@@ -509,7 +508,7 @@ Archive support notes:
 - `.tar.bz2` and `.tbz2` are decompressed in-process via the Rust `bzip2` crate
 - no external `bzip2` command is required at runtime, but builds still depend on the crate being available for the target platform
 
-It does not currently verify signatures beyond checksums, and it assumes plugin definitions point to the correct release assets.
+Signature verification is best-effort: it runs when a plugin defines `signature_asset_pattern` and `signature_format`, but plugins that omit those fields rely solely on checksum validation. Plugin definitions are trusted to point to the correct release assets.
 
 ## Development
 
