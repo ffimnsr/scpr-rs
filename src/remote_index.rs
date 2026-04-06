@@ -9,6 +9,12 @@ use std::{
 use tempfile::NamedTempFile;
 use tracing::warn;
 
+/// The built-in default plugin index bundled with scpr. Automatically used on a
+/// fresh install (when no `remote-indexes.toml` exists). Users can disable or
+/// remove it at any time via `scpr plugins index disable/remove`.
+pub const DEFAULT_PLUGIN_INDEX_REPO: &str = "ffimnsr/scpr-rs";
+pub const DEFAULT_PLUGIN_INDEX_BRANCH: &str = "master";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemotePluginIndex {
     pub repo: String,
@@ -27,8 +33,15 @@ pub struct PluginIndexPin {
     pub repo: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RemoteIndexConfig {
+    /// Set to `true` the first time the config is saved after bootstrapping.
+    /// When `false`, the built-in default index is injected automatically so
+    /// existing and fresh installs both get plugins out of the box without any
+    /// manual setup. Once saved it stays `true` forever, so deliberate removal
+    /// of all indexes is respected on subsequent runs.
+    #[serde(default)]
+    bootstrapped: bool,
     #[serde(default)]
     indexes: Vec<RemotePluginIndex>,
     #[serde(default)]
@@ -58,10 +71,68 @@ impl RemoteIndexManager {
         let cache_root = base_dir.join("remote-indexes");
         fs::create_dir_all(&cache_root)
             .with_context(|| format!("Failed to create {}", cache_root.display()))?;
-        Ok(Self {
+        let manager = Self {
             config_file: base_dir.join("remote-indexes.toml"),
             cache_root,
-        })
+        };
+        // Write the config file on the very first run so the default index is
+        // persisted immediately and the file is visible to the user.
+        manager.bootstrap_if_needed()?;
+        Ok(manager)
+    }
+
+    /// Write an initial config containing the built-in default index if no
+    /// config file exists yet, or if it exists but has never been bootstrapped.
+    fn bootstrap_if_needed(&self) -> Result<()> {
+        let needs_bootstrap = if self.config_file.exists() {
+            let content = fs::read_to_string(&self.config_file).with_context(|| {
+                format!("Failed to read {}", self.config_file.display())
+            })?;
+            let config: RemoteIndexConfig = toml::from_str(&content)
+                .context("Failed to parse remote index config")?;
+            !config.bootstrapped
+        } else {
+            true
+        };
+
+        if needs_bootstrap {
+            let config = RemoteIndexConfig {
+                bootstrapped: true,
+                indexes: vec![RemotePluginIndex {
+                    repo: DEFAULT_PLUGIN_INDEX_REPO.to_string(),
+                    branch: DEFAULT_PLUGIN_INDEX_BRANCH.to_string(),
+                    enabled: true,
+                    added_at_unix: None,
+                    last_synced_unix: None,
+                }],
+                plugin_pins: Vec::new(),
+            };
+            self.write_config_raw(&config)?;
+        } else {
+            // Correct the branch of the default index in case a previously
+            // bootstrapped config has a stale branch name (e.g. "main" from an
+            // earlier release when the correct branch is "master").
+            self.fix_default_index_branch_if_wrong()?;
+        }
+        Ok(())
+    }
+
+    fn fix_default_index_branch_if_wrong(&self) -> Result<()> {
+        let mut config = self.load_config()?;
+        let Some(index) = config
+            .indexes
+            .iter_mut()
+            .find(|i| i.repo == DEFAULT_PLUGIN_INDEX_REPO)
+        else {
+            return Ok(());
+        };
+        if index.branch != DEFAULT_PLUGIN_INDEX_BRANCH {
+            index.branch = DEFAULT_PLUGIN_INDEX_BRANCH.to_string();
+            // Reset last_synced so the next operation re-syncs with the correct branch.
+            index.last_synced_unix = None;
+            self.write_config_raw(&config)?;
+        }
+        Ok(())
     }
 
     pub fn list(&self) -> Result<Vec<RemotePluginIndex>> {
@@ -81,7 +152,8 @@ impl RemoteIndexManager {
         let mut config = self.load_config()?;
         if config.indexes.iter().any(|index| index.repo == repo) {
             return Err(anyhow!(
-                "Remote plugin index '{repo}' is already configured"
+                "Remote plugin index '{repo}' is already configured.\n\
+                 Run `scpr plugins index list` to see all configured indexes."
             ));
         }
 
@@ -164,7 +236,7 @@ impl RemoteIndexManager {
             .indexes
             .iter_mut()
             .find(|index| index.repo == repo)
-            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured"))?;
+            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured.\nRun `scpr plugins index list` to see configured indexes, or `scpr plugins index add {repo}` to add it."))?;
         self.sync_index(client, index).await?;
         let result = index.clone();
         self.save_config(&config)?;
@@ -183,7 +255,7 @@ impl RemoteIndexManager {
             .indexes
             .iter_mut()
             .find(|index| index.repo == repo)
-            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured"))?;
+            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured.\nRun `scpr plugins index list` to see configured indexes, or `scpr plugins index add {repo}` to add it."))?;
         self.sync_index(client, index).await?;
         let summary =
             summarize_plugin_changes(&repo, before, self.plugin_name_map(index)?);
@@ -206,7 +278,7 @@ impl RemoteIndexManager {
             .indexes
             .iter()
             .position(|index| index.repo == repo)
-            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured"))?;
+            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured.\nRun `scpr plugins index list` to see configured indexes, or `scpr plugins index add {repo}` to add it."))?;
         let removed = config.indexes.remove(position);
         let cache_dir = self.cache_dir(&removed);
         if cache_dir.exists() {
@@ -235,7 +307,10 @@ impl RemoteIndexManager {
         let repo = normalize_repo(repo)?;
         let mut config = self.load_config()?;
         if !config.indexes.iter().any(|index| index.repo == repo) {
-            return Err(anyhow!("Remote plugin index '{repo}' is not configured"));
+            return Err(anyhow!(
+                "Remote plugin index '{repo}' is not configured.\n\
+                 Run `scpr plugins index list` to see configured indexes, or `scpr plugins index add {repo}` to add it."
+            ));
         }
 
         if let Some(existing) = config
@@ -266,7 +341,7 @@ impl RemoteIndexManager {
             .iter()
             .position(|pin| pin.plugin == plugin)
             .ok_or_else(|| {
-                anyhow!("Plugin '{plugin}' is not pinned to a remote index")
+                anyhow!("Plugin '{plugin}' is not pinned to any remote index.\nRun `scpr plugins index pins` to see current pins.")
             })?;
         let pin = config.plugin_pins.remove(position);
         self.save_config(&config)?;
@@ -326,6 +401,15 @@ impl RemoteIndexManager {
     }
 
     fn save_config(&self, config: &RemoteIndexConfig) -> Result<()> {
+        let mut config = config.clone();
+        // Mark as bootstrapped so the default index is not re-injected after the
+        // user has deliberately managed their index list.
+        config.bootstrapped = true;
+        self.write_config_raw(&config)
+    }
+
+    /// Write `config` to disk atomically without modifying `bootstrapped`.
+    fn write_config_raw(&self, config: &RemoteIndexConfig) -> Result<()> {
         let content =
             toml::to_string(config).context("Failed to serialize remote index config")?;
         let config_dir = self
@@ -364,7 +448,9 @@ impl RemoteIndexManager {
 
         if plugin_paths.is_empty() {
             return Err(anyhow!(
-                "Remote plugin index '{}' does not contain any plugin TOML files under plugins/",
+                "Remote plugin index '{}' does not contain any plugin TOML files.\n\
+                 The repository must have a `plugins/` directory with .toml plugin definitions.\n\
+                 See an example at https://github.com/ffimnsr/scpr-rs/tree/main/plugins",
                 index.repo
             ));
         }
@@ -463,7 +549,7 @@ impl RemoteIndexManager {
             .indexes
             .iter_mut()
             .find(|index| index.repo == repo)
-            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured"))?;
+            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured.\nRun `scpr plugins index list` to see configured indexes, or `scpr plugins index add {repo}` to add it."))?;
         index.enabled = enabled;
         let result = index.clone();
         self.save_config(&config)?;
@@ -477,7 +563,7 @@ impl RemoteIndexManager {
             .indexes
             .iter()
             .position(|index| index.repo == repo)
-            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured"))?;
+            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured.\nRun `scpr plugins index list` to see configured indexes, or `scpr plugins index add {repo}` to add it."))?;
 
         if toward_front {
             if index > 0 {
@@ -583,6 +669,15 @@ mod tests {
         }
     }
 
+    /// Returns a manager created via `from_base_dir`, which runs bootstrap logic.
+    fn temp_boot_manager() -> RemoteIndexManager {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.keep();
+        let base = root.join("scpr");
+        std::fs::create_dir_all(&base).unwrap();
+        RemoteIndexManager::from_base_dir(base).unwrap()
+    }
+
     #[test]
     fn test_normalize_repo_accepts_plain_repo() {
         assert_eq!(
@@ -609,6 +704,7 @@ mod tests {
         let manager = temp_manager();
         manager
             .save_config(&RemoteIndexConfig {
+                bootstrapped: true,
                 indexes: vec![
                     RemotePluginIndex {
                         repo: "a/one".to_string(),
@@ -644,6 +740,7 @@ mod tests {
         let manager = temp_manager();
         manager
             .save_config(&RemoteIndexConfig {
+                bootstrapped: true,
                 indexes: vec![
                     RemotePluginIndex {
                         repo: "a/one".to_string(),
@@ -679,6 +776,7 @@ mod tests {
         let manager = temp_manager();
         manager
             .save_config(&RemoteIndexConfig {
+                bootstrapped: true,
                 indexes: vec![
                     RemotePluginIndex {
                         repo: "a/one".to_string(),
@@ -712,6 +810,7 @@ mod tests {
         let manager = temp_manager();
         manager
             .save_config(&RemoteIndexConfig {
+                bootstrapped: true,
                 indexes: vec![
                     RemotePluginIndex {
                         repo: "a/one".to_string(),
@@ -747,6 +846,7 @@ mod tests {
         let manager = temp_manager();
         manager
             .save_config(&RemoteIndexConfig {
+                bootstrapped: true,
                 indexes: vec![RemotePluginIndex {
                     repo: "a/one".to_string(),
                     branch: "main".to_string(),
@@ -768,5 +868,92 @@ mod tests {
     #[test]
     fn test_normalize_plugin_name_rejects_empty_string() {
         assert!(normalize_plugin_name("   ").is_err());
+    }
+
+    #[test]
+    fn test_fresh_install_seeds_default_index() {
+        // from_base_dir bootstraps the file; list() must return the default.
+        let manager = temp_boot_manager();
+        assert!(
+            manager.config_file.exists(),
+            "bootstrap must create the file"
+        );
+        let indexes = manager.list().unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].repo, super::DEFAULT_PLUGIN_INDEX_REPO);
+        assert_eq!(indexes[0].branch, super::DEFAULT_PLUGIN_INDEX_BRANCH);
+        assert!(indexes[0].enabled);
+    }
+
+    #[test]
+    fn test_existing_empty_config_seeds_default_when_not_bootstrapped() {
+        // A pre-existing file with bootstrapped=false (e.g. old install) must
+        // be upgraded to include the default index when from_base_dir is called.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base = temp_dir.keep().join("scpr");
+        std::fs::create_dir_all(&base).unwrap();
+        let config_path = base.join("remote-indexes.toml");
+        std::fs::write(
+            &config_path,
+            "bootstrapped = false\nindexes = []\nplugin_pins = []\n",
+        )
+        .unwrap();
+        let manager = RemoteIndexManager::from_base_dir(base).unwrap();
+        let indexes = manager.list().unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].repo, super::DEFAULT_PLUGIN_INDEX_REPO);
+    }
+
+    #[test]
+    fn test_bootstrapped_config_does_not_reseed_when_indexes_empty() {
+        // A file with bootstrapped=true and no indexes must not re-inject the
+        // default — the user deliberately cleared their index list.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base = temp_dir.keep().join("scpr");
+        std::fs::create_dir_all(&base).unwrap();
+        let config_path = base.join("remote-indexes.toml");
+        std::fs::write(
+            &config_path,
+            "bootstrapped = true\nindexes = []\nplugin_pins = []\n",
+        )
+        .unwrap();
+        let manager = RemoteIndexManager::from_base_dir(base).unwrap();
+        assert!(manager.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_removing_default_index_persists_empty_list() {
+        // removing it must not re-seed it on the next from_base_dir call.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base = temp_dir.keep().join("scpr");
+        std::fs::create_dir_all(&base).unwrap();
+        let manager = RemoteIndexManager::from_base_dir(base.clone()).unwrap();
+        assert_eq!(manager.list().unwrap().len(), 1);
+        manager.remove(super::DEFAULT_PLUGIN_INDEX_REPO).unwrap();
+        // Simulating a new process: create fresh manager from the same base.
+        let manager2 = RemoteIndexManager::from_base_dir(base).unwrap();
+        assert!(manager2.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_stale_branch_in_default_index_is_corrected_on_startup() {
+        // A config that was bootstrapped with the wrong branch (e.g. "main"
+        // before the branch was renamed to "master") must be corrected when
+        // from_base_dir is called again.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base = temp_dir.keep().join("scpr");
+        std::fs::create_dir_all(&base).unwrap();
+        let config_path = base.join("remote-indexes.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "bootstrapped = true\nplugin_pins = []\n\n[[indexes]]\nrepo = \"{}\"\nbranch = \"wrong-branch\"\nenabled = true\n",
+                super::DEFAULT_PLUGIN_INDEX_REPO
+            ),
+        )
+        .unwrap();
+        let manager = RemoteIndexManager::from_base_dir(base).unwrap();
+        let indexes = manager.list().unwrap();
+        assert_eq!(indexes[0].branch, super::DEFAULT_PLUGIN_INDEX_BRANCH);
     }
 }

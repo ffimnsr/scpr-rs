@@ -135,6 +135,7 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
         .subcommand(
             Command::new("plugins")
                 .about("Inspect available plugins")
+                .arg_required_else_help(true)
                 .subcommand(
                     Command::new("list")
                         .about("List all available plugins")
@@ -218,6 +219,7 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                 .subcommand(
                     Command::new("index")
                         .about("Manage remote plugin indexes")
+                        .arg_required_else_help(true)
                         .subcommand(
                             Command::new("add")
                                 .about("Add a remote plugin index from a GitHub repository")

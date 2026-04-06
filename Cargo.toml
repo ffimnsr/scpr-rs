@@ -1,6 +1,6 @@
 [package]
 name = "scpr"
-version = "0.5.0"
+version = "0.5.2"
 authors = ["Edward Fitz Abucay gh:@ffimnsr"]
 edition = "2024"
 readme = "README.md"
