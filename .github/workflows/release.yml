@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive_ext: tar.gz
+            binary_name: scpr
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+            binary_name: scpr
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+            binary_name: scpr
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare package metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)"
+          fi
+          BASENAME="scpr-${VERSION}-${{ matrix.target }}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "basename=${BASENAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASENAME="${{ steps.meta.outputs.basename }}"
+          mkdir -p "${BASENAME}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "${BASENAME}/scpr"
+          cp README.md COPYRIGHT LICENSE-APACHE LICENSE-MIT "${BASENAME}/"
+          tar -czf "${BASENAME}.tar.gz" "${BASENAME}"
+          shasum -a 256 "${BASENAME}.tar.gz" | awk '{print $1 "  ${{ steps.meta.outputs.basename }}.tar.gz"}' > "${BASENAME}.tar.gz.sha256"
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            ${{ steps.meta.outputs.basename }}.${{ matrix.archive_ext }}
+            ${{ steps.meta.outputs.basename }}.${{ matrix.archive_ext }}.sha256
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    steps:
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+            *.tar.gz.sha256
