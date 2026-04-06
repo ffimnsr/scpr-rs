@@ -8,12 +8,30 @@ use tracing::{debug, info, warn};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RETRIES: usize = 3;
+const MAX_DOWNLOAD_SIZE_BYTES: u64 = 500 * 1024 * 1024;
 
 /// A GitHub release returned by the releases API.
 #[derive(Debug, Deserialize)]
 pub struct Release {
     pub tag_name: String,
     pub assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepoMetadata {
+    pub default_branch: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitTreeResponse {
+    pub tree: Vec<GitTreeEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitTreeEntry {
+    pub path: String,
+    #[serde(rename = "type")]
+    pub entry_type: String,
 }
 
 /// A single asset attached to a GitHub release.
@@ -26,6 +44,7 @@ pub struct ReleaseAsset {
 }
 
 /// Thin wrapper around [`reqwest::Client`] for GitHub API calls.
+#[derive(Clone)]
 pub struct GithubClient {
     client: reqwest::Client,
 }
@@ -70,6 +89,47 @@ impl GithubClient {
         Ok(release)
     }
 
+    pub async fn get_repo_metadata(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<RepoMetadata> {
+        let url = format!("https://api.github.com/repos/{owner}/{repo}");
+        debug!("Fetching repo metadata: {url}");
+        let response = self.get_with_retries(&url, "GitHub API request").await?;
+        response
+            .json()
+            .await
+            .context("Failed to parse GitHub repo metadata")
+    }
+
+    pub async fn get_git_tree(
+        &self,
+        owner: &str,
+        repo: &str,
+        r#ref: &str,
+    ) -> Result<GitTreeResponse> {
+        let url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/git/trees/{ref}?recursive=1",
+            ref = r#ref
+        );
+        debug!("Fetching git tree: {url}");
+        let response = self.get_with_retries(&url, "GitHub API request").await?;
+        response
+            .json()
+            .await
+            .context("Failed to parse GitHub git tree response")
+    }
+
+    pub async fn download_text(&self, url: &str) -> Result<String> {
+        debug!("Downloading text: {url}");
+        let response = self.get_with_retries(url, "text download request").await?;
+        response
+            .text()
+            .await
+            .context("Failed to read text response")
+    }
+
     /// Fetch a specific release by tag for `owner/repo`.
     pub async fn get_release_by_tag(
         &self,
@@ -103,6 +163,13 @@ impl GithubClient {
         let response = self.get_with_retries(url, "asset download request").await?;
 
         let total = response.content_length().unwrap_or(expected_size);
+        if total > MAX_DOWNLOAD_SIZE_BYTES {
+            return Err(anyhow!(
+                "Refusing to download asset larger than {} bytes (reported size: {} bytes)",
+                MAX_DOWNLOAD_SIZE_BYTES,
+                total
+            ));
+        }
 
         let pb = ProgressBar::new(total);
         pb.set_style(
@@ -117,9 +184,18 @@ impl GithubClient {
 
         let mut data: Vec<u8> = Vec::with_capacity(total as usize);
         let mut stream = response.bytes_stream();
+        let mut downloaded = 0_u64;
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("Failed to read response chunk")?;
+            downloaded = downloaded.saturating_add(chunk.len() as u64);
+            if downloaded > MAX_DOWNLOAD_SIZE_BYTES {
+                pb.finish_and_clear();
+                return Err(anyhow!(
+                    "Refusing to download asset larger than {} bytes",
+                    MAX_DOWNLOAD_SIZE_BYTES
+                ));
+            }
             pb.inc(chunk.len() as u64);
             data.extend_from_slice(&chunk);
         }

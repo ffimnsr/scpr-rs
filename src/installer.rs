@@ -1,6 +1,7 @@
 use crate::{
     github::{GithubClient, ReleaseAsset},
     plugin::Plugin,
+    settings::AppSettings,
 };
 use anyhow::{Context, Result, anyhow};
 use bzip2::read::BzDecoder;
@@ -25,6 +26,8 @@ use zstd::stream::read::Decoder as ZstdDecoder;
 
 const LOCK_RETRY_DELAY_MS: u64 = 100;
 const LOCK_RETRY_ATTEMPTS: usize = 100;
+const LOCK_STALE_AFTER_SECS: u64 = 60;
+const STATE_VERSION: u32 = 1;
 
 /// Record of a single installed package, persisted in `~/.local/share/scpr/state.toml`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -52,8 +55,62 @@ pub struct InstalledPackage {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct State {
+    #[serde(default = "default_state_version")]
+    version: u32,
     #[serde(default)]
     installed: Vec<InstalledPackage>,
+    #[serde(default)]
+    history: Vec<HistoryEvent>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum StateFormat {
+    Json,
+    Toml,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryAction {
+    Installed,
+    Updated,
+    Removed,
+    Pinned,
+    Unpinned,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HistoryEvent {
+    pub package: String,
+    pub action: HistoryAction,
+    pub timestamp_unix: u64,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub from_version: Option<String>,
+    #[serde(default)]
+    pub to_version: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditStatus {
+    Ok,
+    Modified,
+    Missing,
+    Untracked,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct AuditRecord {
+    pub package: String,
+    pub binary_path: PathBuf,
+    pub status: AuditStatus,
+    pub expected_checksum: Option<String>,
+    pub actual_checksum: Option<String>,
+    pub detail: String,
 }
 
 #[derive(Debug)]
@@ -82,6 +139,7 @@ struct StateLock {
 
 /// Installs and uninstalls GitHub-release binaries into the user's local
 /// directories (`~/.local/bin`, `~/.local/share/man`).
+#[derive(Clone)]
 pub struct Installer {
     /// `~/.local/bin`
     local_bin: PathBuf,
@@ -94,14 +152,20 @@ pub struct Installer {
 impl Installer {
     /// Create a new [`Installer`], ensuring all required directories exist.
     pub fn new() -> Result<Self> {
-        let home = dirs::home_dir().context("Failed to determine home directory")?;
-        let local_bin = home.join(".local/bin");
-        let local_man = home.join(".local/share/man/man1");
-        let state_dir = home.join(".local/share/scpr");
+        let settings = AppSettings::load()?;
+        Self::from_settings(&settings)
+    }
+
+    pub fn from_settings(settings: &AppSettings) -> Result<Self> {
+        let local_bin = settings.install_dir().to_path_buf();
+        let local_man = settings.man_dir().to_path_buf();
+        let state_dir = settings.data_dir().to_path_buf();
         let state_file = state_dir.join("state.toml");
 
         fs::create_dir_all(&local_bin)
             .with_context(|| format!("Failed to create {}", local_bin.display()))?;
+        fs::create_dir_all(&local_man)
+            .with_context(|| format!("Failed to create {}", local_man.display()))?;
         fs::create_dir_all(&state_dir)
             .with_context(|| format!("Failed to create {}", state_dir.display()))?;
 
@@ -114,16 +178,34 @@ impl Installer {
 
     fn load_state(&self) -> Result<State> {
         if !self.state_file.exists() {
-            return Ok(State::default());
+            return Ok(State {
+                version: STATE_VERSION,
+                ..State::default()
+            });
         }
 
         let content =
             fs::read_to_string(&self.state_file).context("Failed to read state file")?;
-        toml::from_str(&content).context("Failed to parse state file")
+        let state: State =
+            toml::from_str(&content).context("Failed to parse state file")?;
+        if state.version != STATE_VERSION {
+            return Err(anyhow!(
+                "Unsupported state file version {} in {}. Expected version {}.",
+                state.version,
+                self.state_file.display(),
+                STATE_VERSION
+            ));
+        }
+        Ok(state)
     }
 
     fn save_state(&self, state: &State) -> Result<()> {
-        let content = toml::to_string(state).context("Failed to serialize state")?;
+        let state = State {
+            version: STATE_VERSION,
+            installed: state.installed.clone(),
+            history: state.history.clone(),
+        };
+        let content = toml::to_string(&state).context("Failed to serialize state")?;
         let state_dir = self
             .state_file
             .parent()
@@ -170,6 +252,7 @@ impl Installer {
         plugin: &Plugin,
         client: &GithubClient,
         tag: Option<&str>,
+        target_override: Option<&str>,
         dry_run: bool,
     ) -> Result<()> {
         let (owner, repo) = plugin.github_repo().ok_or_else(|| {
@@ -185,12 +268,24 @@ impl Installer {
 
         info!("Installing {} for {os}/{arch}…", plugin.name);
 
-        let target = plugin.resolve_target(os, arch).ok_or_else(|| {
-            anyhow!(
-                "No target triple defined for {os}/{arch} in plugin '{}'",
-                plugin.name
-            )
-        })?;
+        let target = match target_override {
+            Some(target) => target.to_string(),
+            None => plugin.resolve_target(os, arch).ok_or_else(|| {
+                let available = plugin.available_target_keys();
+                if available.is_empty() {
+                    anyhow!(
+                        "No target triple defined for {os}/{arch} in plugin '{}'. This plugin has no [plugin.targets] entries. Use --target <triple> to override manually.",
+                        plugin.name
+                    )
+                } else {
+                    anyhow!(
+                        "No target triple defined for {os}/{arch} in plugin '{}'. Available target keys: {}. Use --target <triple> to override manually.",
+                        plugin.name,
+                        available.join(", ")
+                    )
+                }
+            })?,
+        };
         debug!("Resolved target: {target}");
 
         let release = match tag {
@@ -279,7 +374,7 @@ impl Installer {
         };
 
         if dry_run {
-            info!(
+            println!(
                 "[dry-run] Would install '{}' → {}",
                 payload.binary_filename,
                 self.local_bin.join(&payload.binary_filename).display()
@@ -291,13 +386,12 @@ impl Installer {
         let installed_paths = self.commit_install(payload)?;
 
         let mut state = self.load_state()?;
-        // Preserve the existing `pinned` value when reinstalling.
-        let pinned = state
+        let previous = state
             .installed
             .iter()
             .find(|p| p.name == plugin.name)
-            .map(|p| p.pinned)
-            .unwrap_or(false);
+            .cloned();
+        let pinned = previous.as_ref().map(|p| p.pinned).unwrap_or(false);
         state
             .installed
             .retain(|package| package.name != plugin.name);
@@ -313,9 +407,37 @@ impl Installer {
             installed_at_unix: Some(current_unix_timestamp()?),
             pinned,
         });
+        let action = if let Some(previous) = previous {
+            HistoryEvent {
+                package: plugin.name.clone(),
+                action: HistoryAction::Updated,
+                timestamp_unix: current_unix_timestamp()?,
+                version: Some(tag.clone()),
+                from_version: Some(previous.version),
+                to_version: Some(tag.clone()),
+                detail: Some(format!(
+                    "Installed binary {}",
+                    installed_paths.binary_filename
+                )),
+            }
+        } else {
+            HistoryEvent {
+                package: plugin.name.clone(),
+                action: HistoryAction::Installed,
+                timestamp_unix: current_unix_timestamp()?,
+                version: Some(tag.clone()),
+                from_version: None,
+                to_version: Some(tag.clone()),
+                detail: Some(format!(
+                    "Installed binary {}",
+                    installed_paths.binary_filename
+                )),
+            }
+        };
+        state.history.push(action);
         self.save_state(&state)?;
 
-        info!(
+        println!(
             "✓ Installed '{}' → {}",
             installed_paths.binary_filename,
             self.local_bin
@@ -341,21 +463,21 @@ impl Installer {
 
         let binary_dest = self.local_bin.join(&package.binary);
         if dry_run {
-            info!("[dry-run] Would remove {}", binary_dest.display());
+            println!("[dry-run] Would remove {}", binary_dest.display());
             for filename in &package.man_pages {
-                info!(
+                println!(
                     "[dry-run] Would remove {}",
                     self.local_man.join(filename).display()
                 );
             }
-            info!("[dry-run] Would uninstall '{}'", plugin.name);
+            println!("[dry-run] Would uninstall '{}'", plugin.name);
             return Ok(());
         }
 
         if binary_dest.exists() {
             fs::remove_file(&binary_dest)
                 .with_context(|| format!("Failed to remove {}", binary_dest.display()))?;
-            info!("Removed {}", binary_dest.display());
+            println!("Removed {}", binary_dest.display());
         }
 
         for filename in &package.man_pages {
@@ -364,7 +486,7 @@ impl Installer {
                 if let Err(err) = fs::remove_file(&man_dest) {
                     warn!("Failed to remove man page {}: {err}", man_dest.display());
                 } else {
-                    info!("Removed {}", man_dest.display());
+                    println!("Removed {}", man_dest.display());
                 }
             }
         }
@@ -373,9 +495,19 @@ impl Installer {
         state
             .installed
             .retain(|installed| installed.name != plugin.name);
+        let removed_version = package.version.clone();
+        state.history.push(HistoryEvent {
+            package: plugin.name.clone(),
+            action: HistoryAction::Removed,
+            timestamp_unix: current_unix_timestamp()?,
+            version: Some(removed_version.clone()),
+            from_version: Some(removed_version),
+            to_version: None,
+            detail: Some(format!("Removed binary {}", package.binary)),
+        });
         self.save_state(&state)?;
 
-        info!("✓ Uninstalled '{}'", plugin.name);
+        println!("✓ Uninstalled '{}'", plugin.name);
         Ok(())
     }
 
@@ -391,8 +523,14 @@ impl Installer {
                     return Ok(StateLock { path: lock_path });
                 }
                 Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                    tokio::time::sleep(std::time::Duration::from_millis(LOCK_RETRY_DELAY_MS))
-                        .await;
+                    if self.clear_stale_lock(&lock_path)? {
+                        warn!("Removed stale installer lock {}", lock_path.display());
+                        continue;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        LOCK_RETRY_DELAY_MS,
+                    ))
+                    .await;
                 }
                 Err(err) => {
                     return Err(err).with_context(|| {
@@ -403,9 +541,38 @@ impl Installer {
         }
 
         Err(anyhow!(
-            "Timed out waiting for installer lock {}",
+            "Timed out waiting for installer lock {}. If a previous scpr process crashed, remove the lock file or wait for it to become stale.",
             lock_path.display()
         ))
+    }
+
+    fn clear_stale_lock(&self, lock_path: &Path) -> Result<bool> {
+        let metadata = match fs::metadata(lock_path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("Failed to inspect lock {}", lock_path.display())
+                });
+            }
+        };
+        let modified = metadata.modified().with_context(|| {
+            format!("Failed to read lock timestamp {}", lock_path.display())
+        })?;
+        let age = SystemTime::now()
+            .duration_since(modified)
+            .unwrap_or_default()
+            .as_secs();
+        if age < LOCK_STALE_AFTER_SECS {
+            return Ok(false);
+        }
+        match fs::remove_file(lock_path) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err).with_context(|| {
+                format!("Failed to remove stale lock {}", lock_path.display())
+            }),
+        }
     }
 
     fn extract_from_targz(
@@ -436,7 +603,8 @@ impl Installer {
         binary_path: &str,
         man_paths: &[String],
     ) -> Result<InstallPayload> {
-        let zst = ZstdDecoder::new(Cursor::new(data)).context("Failed to init zstd decoder")?;
+        let zst =
+            ZstdDecoder::new(Cursor::new(data)).context("Failed to init zstd decoder")?;
         let mut archive = Archive::new(zst);
         self.extract_from_tar(archive.entries()?, binary_path, man_paths)
     }
@@ -687,61 +855,6 @@ impl Installer {
         })
     }
 
-    /// Verify the SHA-256 checksum of every installed binary against the value
-    /// recorded at install time.  Returns `Ok(())` if all pass, or an error
-    /// listing every failure.
-    pub fn verify(&self) -> Result<()> {
-        let installed = self.load_state()?.installed;
-        if installed.is_empty() {
-            info!("No packages installed — nothing to verify.");
-            return Ok(());
-        }
-
-        let mut failures: Vec<String> = Vec::new();
-        for pkg in &installed {
-            let Some(expected) = pkg.checksum_sha256.as_deref() else {
-                warn!(
-                    "'{}': no stored checksum, skipping verification",
-                    pkg.name
-                );
-                continue;
-            };
-
-            let binary_path = self.local_bin.join(&pkg.binary);
-            let data = match fs::read(&binary_path) {
-                Ok(data) => data,
-                Err(err) => {
-                    failures.push(format!(
-                        "{}: cannot read {}: {err}",
-                        pkg.name,
-                        binary_path.display()
-                    ));
-                    continue;
-                }
-            };
-
-            let actual = sha256_hex(&data);
-            if actual == expected {
-                info!("✓ {} — SHA-256 OK", pkg.name);
-            } else {
-                failures.push(format!(
-                    "{}: expected {expected}, got {actual}",
-                    pkg.name
-                ));
-            }
-        }
-
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "SHA-256 verification failed for {} package(s):\n{}",
-                failures.len(),
-                failures.join("\n")
-            ))
-        }
-    }
-
     /// Mark an installed package as pinned so `update --all` will skip it.
     pub fn pin(&self, name: &str) -> Result<()> {
         self.set_pinned(name, true)
@@ -753,20 +866,167 @@ impl Installer {
     }
 
     fn set_pinned(&self, name: &str, pinned: bool) -> Result<()> {
+        let _lock = self.acquire_state_lock_blocking()?;
         let mut state = self.load_state()?;
-        let pkg = state
-            .installed
-            .iter_mut()
-            .find(|p| p.name == name)
-            .ok_or_else(|| anyhow!("'{name}' is not installed"))?;
-        pkg.pinned = pinned;
+        let version = {
+            let pkg = state
+                .installed
+                .iter_mut()
+                .find(|p| p.name == name)
+                .ok_or_else(|| anyhow!("'{name}' is not installed"))?;
+            pkg.pinned = pinned;
+            pkg.version.clone()
+        };
+        state.history.push(HistoryEvent {
+            package: name.to_string(),
+            action: if pinned {
+                HistoryAction::Pinned
+            } else {
+                HistoryAction::Unpinned
+            },
+            timestamp_unix: current_unix_timestamp()?,
+            version: Some(version),
+            from_version: None,
+            to_version: None,
+            detail: Some(if pinned {
+                "Package pinned".to_string()
+            } else {
+                "Package unpinned".to_string()
+            }),
+        });
         self.save_state(&state)?;
         if pinned {
-            info!("Pinned '{name}' — it will be skipped by `update --all`");
+            println!("Pinned '{name}' — it will be skipped by `update --all`");
         } else {
-            info!("Unpinned '{name}'");
+            println!("Unpinned '{name}'");
         }
         Ok(())
+    }
+
+    pub fn audit(&self) -> Result<Vec<AuditRecord>> {
+        let installed = self.load_state()?.installed;
+        let mut records = Vec::new();
+
+        for pkg in installed {
+            let binary_path = self.local_bin.join(&pkg.binary);
+            let Some(expected) = pkg.checksum_sha256.clone() else {
+                records.push(AuditRecord {
+                    package: pkg.name,
+                    binary_path,
+                    status: AuditStatus::Untracked,
+                    expected_checksum: None,
+                    actual_checksum: None,
+                    detail: "No stored checksum; cannot verify local changes".to_string(),
+                });
+                continue;
+            };
+
+            if !binary_path.exists() {
+                records.push(AuditRecord {
+                    package: pkg.name,
+                    binary_path,
+                    status: AuditStatus::Missing,
+                    expected_checksum: Some(expected),
+                    actual_checksum: None,
+                    detail: "Installed binary is missing".to_string(),
+                });
+                continue;
+            }
+
+            let data = fs::read(&binary_path).with_context(|| {
+                format!("Failed to read installed binary {}", binary_path.display())
+            })?;
+            let actual = sha256_hex(&data);
+            if actual == expected {
+                records.push(AuditRecord {
+                    package: pkg.name,
+                    binary_path,
+                    status: AuditStatus::Ok,
+                    expected_checksum: Some(expected),
+                    actual_checksum: Some(actual),
+                    detail: "Binary matches the recorded SHA-256 checksum".to_string(),
+                });
+            } else {
+                records.push(AuditRecord {
+                    package: pkg.name,
+                    binary_path,
+                    status: AuditStatus::Modified,
+                    expected_checksum: Some(expected),
+                    actual_checksum: Some(actual),
+                    detail: "Binary contents have changed since installation".to_string(),
+                });
+            }
+        }
+
+        records.sort_by(|left, right| left.package.cmp(&right.package));
+        Ok(records)
+    }
+
+    pub fn history(&self, package: Option<&str>) -> Result<Vec<HistoryEvent>> {
+        let mut events = self.load_state()?.history;
+        if let Some(package) = package {
+            events.retain(|event| event.package == package);
+        }
+        events.sort_by_key(|event| event.timestamp_unix);
+        Ok(events)
+    }
+
+    pub fn history_limited(
+        &self,
+        package: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<HistoryEvent>> {
+        let mut events = self.history(package)?;
+        if let Some(limit) = limit
+            && events.len() > limit
+        {
+            events = events.split_off(events.len() - limit);
+        }
+        Ok(events)
+    }
+
+    pub fn clear_history(&self, package: Option<&str>) -> Result<usize> {
+        let _lock = self.acquire_state_lock_blocking()?;
+        let mut state = self.load_state()?;
+        let before = state.history.len();
+        if let Some(package) = package {
+            state.history.retain(|event| event.package != package);
+        } else {
+            state.history.clear();
+        }
+        let removed = before.saturating_sub(state.history.len());
+        self.save_state(&state)?;
+        Ok(removed)
+    }
+
+    pub fn export_state(&self, format: StateFormat) -> Result<String> {
+        let state = self.load_state()?;
+        match format {
+            StateFormat::Json => serde_json::to_string_pretty(&state)
+                .context("Failed to serialize state as JSON"),
+            StateFormat::Toml => toml::to_string_pretty(&state)
+                .context("Failed to serialize state as TOML"),
+        }
+    }
+
+    pub fn restore_state(&self, contents: &str, format: StateFormat) -> Result<()> {
+        let _lock = self.acquire_state_lock_blocking()?;
+        let state: State = match format {
+            StateFormat::Json => serde_json::from_str(contents)
+                .context("Failed to parse JSON state backup")?,
+            StateFormat::Toml => {
+                toml::from_str(contents).context("Failed to parse TOML state backup")?
+            }
+        };
+        self.save_state(&state)
+    }
+
+    fn acquire_state_lock_blocking(&self) -> Result<StateLock> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .context("Failed to initialize runtime for installer lock")?;
+        runtime.block_on(self.acquire_state_lock())
     }
 }
 
@@ -786,6 +1046,10 @@ fn current_unix_timestamp() -> Result<u64> {
         .duration_since(UNIX_EPOCH)
         .context("System clock is before the Unix epoch")?
         .as_secs())
+}
+
+fn default_state_version() -> u32 {
+    STATE_VERSION
 }
 
 fn parse_sha256_digest(digest: &str) -> Result<String> {
@@ -931,7 +1195,8 @@ impl Drop for StateLock {
 #[cfg(test)]
 mod tests {
     use super::{
-        InstallPayload, InstalledPackage, Installer, State, parse_sha256_checksum_file,
+        AuditStatus, HistoryAction, InstallPayload, InstalledPackage, Installer,
+        STATE_VERSION, State, StateFormat, parse_sha256_checksum_file,
         parse_sha256_digest,
     };
     use crate::plugin::Plugin;
@@ -1023,6 +1288,23 @@ mod tests {
         std::fs::remove_file(lock_path).unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_acquire_state_lock_clears_stale_lock() {
+        let installer = temp_installer();
+        let lock_path = installer.state_file_path().with_extension("lock");
+        std::fs::write(&lock_path, b"stale").unwrap();
+        std::process::Command::new("touch")
+            .arg("-d")
+            .arg("2 minutes ago")
+            .arg(&lock_path)
+            .status()
+            .unwrap();
+
+        let _lock = installer.acquire_state_lock().await.unwrap();
+        assert!(lock_path.exists());
+    }
+
     #[tokio::test]
     async fn test_state_lock_removed_on_drop() {
         let installer = temp_installer();
@@ -1070,6 +1352,7 @@ mod tests {
         std::fs::write(&man_path, b"manual").unwrap();
         installer
             .save_state(&State {
+                version: STATE_VERSION,
                 installed: vec![InstalledPackage {
                     name: "ripgrep".to_string(),
                     version: "v15.1.0".to_string(),
@@ -1084,6 +1367,7 @@ mod tests {
                     installed_at_unix: Some(1),
                     pinned: false,
                 }],
+                history: Vec::new(),
             })
             .unwrap();
 
@@ -1095,5 +1379,204 @@ mod tests {
         assert!(!binary_path.exists());
         assert!(!man_path.exists());
         assert!(installer.list_installed().unwrap().is_empty());
+        let history = installer.history(Some("ripgrep")).unwrap();
+        assert!(matches!(
+            history.last().unwrap().action,
+            HistoryAction::Removed
+        ));
+    }
+
+    #[test]
+    fn test_audit_detects_modified_binary() {
+        let installer = temp_installer();
+        let binary_path = installer.local_bin_dir().join("rg");
+        std::fs::write(&binary_path, b"modified").unwrap();
+        installer
+            .save_state(&State {
+                version: STATE_VERSION,
+                installed: vec![InstalledPackage {
+                    name: "ripgrep".to_string(),
+                    version: "v15.1.0".to_string(),
+                    binary: "rg".to_string(),
+                    source: None,
+                    target: None,
+                    asset_name: None,
+                    checksum_sha256: Some("a".repeat(64)),
+                    man_pages: Vec::new(),
+                    installed_at_unix: Some(1),
+                    pinned: false,
+                }],
+                history: Vec::new(),
+            })
+            .unwrap();
+
+        let audit = installer.audit().unwrap();
+        assert_eq!(audit.len(), 1);
+        assert!(matches!(audit[0].status, AuditStatus::Modified));
+    }
+
+    #[test]
+    fn test_pin_records_history() {
+        let installer = temp_installer();
+        installer
+            .save_state(&State {
+                version: STATE_VERSION,
+                installed: vec![InstalledPackage {
+                    name: "ripgrep".to_string(),
+                    version: "v15.1.0".to_string(),
+                    binary: "rg".to_string(),
+                    source: None,
+                    target: None,
+                    asset_name: None,
+                    checksum_sha256: Some("a".repeat(64)),
+                    man_pages: Vec::new(),
+                    installed_at_unix: Some(1),
+                    pinned: false,
+                }],
+                history: Vec::new(),
+            })
+            .unwrap();
+
+        installer.pin("ripgrep").unwrap();
+        let history = installer.history(Some("ripgrep")).unwrap();
+        assert!(matches!(
+            history.last().unwrap().action,
+            HistoryAction::Pinned
+        ));
+    }
+
+    #[test]
+    fn test_history_limited_returns_most_recent_events() {
+        let installer = temp_installer();
+        installer
+            .save_state(&State {
+                version: STATE_VERSION,
+                installed: Vec::new(),
+                history: vec![
+                    super::HistoryEvent {
+                        package: "ripgrep".to_string(),
+                        action: HistoryAction::Installed,
+                        timestamp_unix: 1,
+                        version: Some("v1".to_string()),
+                        from_version: None,
+                        to_version: Some("v1".to_string()),
+                        detail: None,
+                    },
+                    super::HistoryEvent {
+                        package: "ripgrep".to_string(),
+                        action: HistoryAction::Updated,
+                        timestamp_unix: 2,
+                        version: Some("v2".to_string()),
+                        from_version: Some("v1".to_string()),
+                        to_version: Some("v2".to_string()),
+                        detail: None,
+                    },
+                    super::HistoryEvent {
+                        package: "ripgrep".to_string(),
+                        action: HistoryAction::Removed,
+                        timestamp_unix: 3,
+                        version: Some("v2".to_string()),
+                        from_version: Some("v2".to_string()),
+                        to_version: None,
+                        detail: None,
+                    },
+                ],
+            })
+            .unwrap();
+
+        let history = installer.history_limited(Some("ripgrep"), Some(2)).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].timestamp_unix, 2);
+        assert_eq!(history[1].timestamp_unix, 3);
+    }
+
+    #[test]
+    fn test_export_and_restore_state_json_round_trip() {
+        let installer = temp_installer();
+        installer
+            .save_state(&State {
+                version: STATE_VERSION,
+                installed: vec![InstalledPackage {
+                    name: "ripgrep".to_string(),
+                    version: "v15.1.0".to_string(),
+                    binary: "rg".to_string(),
+                    source: None,
+                    target: None,
+                    asset_name: None,
+                    checksum_sha256: Some("a".repeat(64)),
+                    man_pages: Vec::new(),
+                    installed_at_unix: Some(1),
+                    pinned: false,
+                }],
+                history: Vec::new(),
+            })
+            .unwrap();
+
+        let exported = installer.export_state(StateFormat::Json).unwrap();
+
+        let restored = temp_installer();
+        restored
+            .restore_state(&exported, StateFormat::Json)
+            .unwrap();
+        let installed = restored.list_installed().unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].name, "ripgrep");
+    }
+
+    #[test]
+    fn test_exported_state_includes_schema_version() {
+        let installer = temp_installer();
+        let exported = installer.export_state(StateFormat::Toml).unwrap();
+        assert!(exported.contains(&format!("version = {}", STATE_VERSION)));
+    }
+
+    #[test]
+    fn test_load_state_rejects_unsupported_schema_version() {
+        let installer = temp_installer();
+        std::fs::write(
+            installer.state_file_path(),
+            "version = 99\ninstalled = []\nhistory = []\n",
+        )
+        .unwrap();
+
+        let error = installer.list_installed().unwrap_err();
+        assert!(error.to_string().contains("Unsupported state file version"));
+    }
+
+    #[test]
+    fn test_clear_history_removes_matching_events() {
+        let installer = temp_installer();
+        installer
+            .save_state(&State {
+                version: STATE_VERSION,
+                installed: Vec::new(),
+                history: vec![
+                    super::HistoryEvent {
+                        package: "ripgrep".to_string(),
+                        action: HistoryAction::Installed,
+                        timestamp_unix: 1,
+                        version: Some("v1".to_string()),
+                        from_version: None,
+                        to_version: Some("v1".to_string()),
+                        detail: None,
+                    },
+                    super::HistoryEvent {
+                        package: "fd".to_string(),
+                        action: HistoryAction::Installed,
+                        timestamp_unix: 2,
+                        version: Some("v1".to_string()),
+                        from_version: None,
+                        to_version: Some("v1".to_string()),
+                        detail: None,
+                    },
+                ],
+            })
+            .unwrap();
+
+        let removed = installer.clear_history(Some("ripgrep")).unwrap();
+        assert_eq!(removed, 1);
+        let history = installer.history(None).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].package, "fd");
     }
 }

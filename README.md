@@ -4,41 +4,94 @@
 [![Crates.io](https://img.shields.io/crates/l/scpr?style=flat-square)](https://crates.io/crates/scpr)
 [![Crates.io](https://img.shields.io/crates/d/scpr?style=flat-square)](https://crates.io/crates/scpr)
 
-`scpr` installs and manages standalone CLI binaries from GitHub releases into your local user directories.
+`scpr` installs and manages standalone CLI binaries from GitHub releases in your user space.
 
-It is designed for tools like `ripgrep` that publish prebuilt archives, and it aims to keep installs predictable:
+It is built for tools like `ripgrep`, `fd`, or other projects that ship release archives, and it focuses on a clean local workflow:
 
-- downloads are verified with SHA-256 before extraction
-- binaries and man pages are staged and swapped into place atomically
-- installed package metadata is tracked locally
-- retries and timeouts are applied to GitHub requests
+- installs into `~/.local/bin`
+- verifies downloads with SHA-256
+- keeps install state locally
+- supports updates, pinning, audit, and history
+- aims to stay friendly in day-to-day terminal use
 
-## What It Manages
+## Quick Start
 
-By default `scpr` uses these paths:
+Install `scpr` with the official script:
 
-- binaries: `~/.local/bin`
-- man pages: `~/.local/share/man/man1`
-- state: `~/.local/share/scpr/state.toml`
-- user plugin definitions: `~/.local/share/scpr/plugins`
-- repo/local plugin definitions during development: `./plugins`
+```sh
+curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh | sh
+```
 
-## Installation
-
-Install from crates.io:
+If you prefer Cargo:
 
 ```bash
 cargo install scpr
 ```
 
-Then make sure `~/.local/bin` is on your `PATH`.
-
-## Quick Start
-
-Install the latest release of a tool:
+Then install your first package:
 
 ```bash
 scpr install ripgrep
+scpr install ripgrep fd bat
+```
+
+## Why scpr
+
+`scpr` sits between manual binary downloads and full system package managers.
+
+Use it when you want:
+
+- a simple per-user install path
+- release-based installs from GitHub
+- lightweight package metadata
+- safer upgrades than ad hoc `curl | tar | cp`
+- visibility into what was installed, when, and whether it changed later
+
+## Installation
+
+### Install using script
+
+The installer downloads the latest GitHub release for your platform, extracts it, installs the binary into `~/.local/bin`, and copies docs/license files when available.
+
+Recommended command:
+
+```sh
+curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh | sh
+```
+
+Helpful installer options:
+
+```sh
+curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh | sh -s -- --bin-dir ~/.local/bin
+curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh | sh -s -- --arch x86_64-unknown-linux-musl
+```
+
+### Install from Cargo
+
+```bash
+cargo install scpr
+```
+
+### After install
+
+Make sure `~/.local/bin` is on your `PATH`.
+
+Example for POSIX shells:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+## Command Overview
+
+### Install and update
+
+Install the latest release:
+
+```bash
+scpr install ripgrep
+scpr install ripgrep fd bat
+scpr install ripgrep --target x86_64-unknown-linux-musl
 ```
 
 Install a specific release:
@@ -48,39 +101,149 @@ scpr install ripgrep@15.1.0
 scpr install ripgrep --tag 15.1.0
 ```
 
+Update one package:
+
+```bash
+scpr update ripgrep
+scpr update ripgrep --target aarch64-apple-darwin
+```
+
+Update everything except pinned packages:
+
+```bash
+scpr update --all
+```
+
+`update --all` runs upgrades with bounded parallelism, so bulk updates complete much faster than a fully sequential pass.
+
+Preview changes without writing anything:
+
+```bash
+scpr install ripgrep --dry-run
+scpr update --all --dry-run
+scpr uninstall ripgrep --dry-run
+```
+
+Force-refresh remote plugin indexes instead of waiting for the cache TTL:
+
+```bash
+scpr --refresh install ripgrep
+scpr --refresh plugins list
+```
+
+### Inspect installed packages
+
 List installed packages:
 
 ```bash
 scpr list
+scpr status
+scpr list --outdated
 ```
 
-Check for newer releases:
+List packages with newer releases available:
 
 ```bash
 scpr outdated
+scpr outdated ripgrep
 ```
 
-Update one package or everything installed:
+Emit JSON for scripting:
 
 ```bash
-scpr update ripgrep
-scpr update --all
+scpr list --json
+scpr list --outdated --json
+scpr outdated --json
 ```
 
-Remove a package:
+### Audit and verification
+
+Verify installed binaries against the checksums recorded at install time:
 
 ```bash
-scpr uninstall ripgrep
+scpr verify
 ```
 
-## Plugin Commands
+`verify` is a compatibility alias for `audit`, so both commands show the same checksum and drift report.
 
-Inspect available plugin definitions:
+Audit the local install directory and detect drift:
+
+```bash
+scpr audit
+scpr audit --json
+```
+
+Audit result meanings:
+
+- `OK`: the local binary matches the recorded checksum
+- `MODIFIED`: the binary exists but its contents changed
+- `MISSING`: the binary no longer exists
+- `UNTRACKED`: no checksum was recorded, so the binary cannot be verified
+
+### History
+
+View package movement over time:
+
+```bash
+scpr history
+scpr history ripgrep
+scpr history --limit 20
+scpr history --graph
+scpr history clear
+scpr history clear ripgrep
+```
+
+History tracks:
+
+- installs
+- updates
+- removals
+- pin/unpin events
+
+### Pinning
+
+Pin a package so `update --all` skips it:
+
+```bash
+scpr pin ripgrep
+scpr unpin ripgrep
+```
+
+### Plugin discovery
+
+List available plugins:
 
 ```bash
 scpr plugins list
+```
+
+Search available plugins:
+
+```bash
 scpr plugins search rip
+```
+
+Inspect a plugin definition:
+
+```bash
 scpr plugins info ripgrep
+```
+
+Manage remote GitHub-backed plugin indexes:
+
+```bash
+scpr plugins index add ffimnsr/scpr-plugins
+scpr plugins index list
+scpr plugins index pin ripgrep ffimnsr/scpr-plugins
+scpr plugins index pins
+scpr plugins index unpin ripgrep
+scpr plugins index promote ffimnsr/scpr-plugins
+scpr plugins index demote ffimnsr/scpr-plugins
+scpr plugins index disable ffimnsr/scpr-plugins
+scpr plugins index enable ffimnsr/scpr-plugins
+scpr plugins index sync --all
+scpr plugins index sync ffimnsr/scpr-plugins
+scpr plugins index remove ffimnsr/scpr-plugins
 ```
 
 Use an additional plugin directory:
@@ -90,25 +253,41 @@ scpr plugins list --plugins-dir /path/to/plugins
 scpr install mytool --plugins-dir /path/to/plugins
 ```
 
-## Health Checks
+Configuration sources:
 
-Run a local health check:
+- `--plugins-dir /path/to/plugins` for one-off overrides
+- `SCPR_PLUGINS_DIR` with standard path separators for extra plugin directories
+- `SCPR_BIN_DIR` to override the binary install directory
+- `~/.config/scpr/config.toml` for persistent settings such as `install_dir`, `man_dir`, `plugin_dirs`, and `index_ttl_secs`
 
-```bash
-scpr doctor
+Remote index notes:
+
+- multiple remote indexes are supported
+- only enabled indexes are used during normal plugin resolution
+- remote indexes must currently be GitHub repositories
+- `scpr` syncs plugin TOML files from `plugins/*.toml` in those repositories
+- remote index syncs are cached for 10 minutes by default; use `--refresh` to bypass the TTL
+- when the same plugin name exists in multiple indexes, the earlier index in `plugins index list` wins
+- use `plugins index promote` and `plugins index demote` to change precedence without removing an index
+- use `plugins index pin <plugin> <owner>/<repo>` to make one plugin prefer a specific remote index
+- plugin source pins are respected by install, update, uninstall, `plugins info`, `outdated`, and `update --all`
+
+### Create a Remote Plugin Index Repo
+
+`scpr` expects a GitHub repository with plugin files stored under `plugins/*.toml`.
+
+Minimal layout:
+
+```text
+my-scpr-index/
+  plugins/
+    ripgrep.toml
+    fd.toml
+    bat.toml
+  README.md
 ```
 
-`doctor` currently checks:
-
-- whether `~/.local/bin` is on `PATH`
-- whether the state file path looks valid
-- whether tracked binaries still exist
-- whether tracked man pages still exist
-- whether plugin directories are readable
-
-## Plugin Format
-
-Plugins are TOML files with a `[plugin]` table. Example:
+Example `plugins/ripgrep.toml`:
 
 ```toml
 [plugin]
@@ -123,6 +302,103 @@ man_pages = ["{name}-{version}-{target}/doc/rg.1"]
 
 [plugin.targets]
 "linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"
+```
+
+Suggested workflow:
+
+1. Create a GitHub repo such as `yourname/scpr-plugins`.
+2. Add one or more plugin TOML files under the repo's `plugins/` directory.
+3. Commit and push the repository.
+4. Add it locally with `scpr plugins index add yourname/scpr-plugins`.
+5. Confirm discovery with `scpr plugins index sync --all` and `scpr plugins list`.
+
+Practical tips:
+
+- keep plugin filenames stable and descriptive, such as `ripgrep.toml`
+- store only plugin definitions in the repo; `scpr` does not need generated metadata files
+- test a plugin locally first with `scpr plugins info <name>` before depending on it remotely
+- if two indexes define the same plugin name, precedence still follows `plugins index list`
+
+### Diagnostics and shell integration
+
+Check local setup:
+
+```bash
+scpr doctor
+```
+
+Adjust CLI verbosity without setting `RUST_LOG` manually:
+
+```bash
+scpr -q list
+scpr -v install ripgrep
+scpr -vv plugins list
+```
+
+Export or restore state when moving to a new machine:
+
+```bash
+scpr export backup.json
+scpr export backup.toml --format toml
+scpr restore backup.json
+```
+
+Generate shell completions:
+
+```bash
+scpr completions bash
+scpr completions zsh
+scpr completions fish
+```
+
+## Storage Layout
+
+By default `scpr` uses:
+
+- binaries: `~/.local/bin`
+- man pages: `~/.local/share/man/man1`
+- state file: `~/.local/share/scpr/state.toml`
+- user plugin definitions: `~/.local/share/scpr/plugins`
+- local development plugin definitions: `./plugins`
+
+Persistent configuration lives at:
+
+- config file: `~/.config/scpr/config.toml`
+- remote index config: `~/.local/share/scpr/remote-indexes.toml`
+
+Example config:
+
+```toml
+install_dir = "/home/alice/.local/bin"
+man_dir = "/home/alice/.local/share/man/man1"
+plugin_dirs = ["/home/alice/.config/scpr/plugins", "/opt/scpr/plugins"]
+index_ttl_secs = 600
+```
+
+## Plugin Format
+
+Plugins are TOML files with a `[plugin]` table.
+
+Example:
+
+```toml
+[plugin]
+name = "ripgrep"
+alias = ["rg", "ripgrep"]
+description = "A fast line-oriented search tool"
+location = "github:BurntSushi/ripgrep"
+asset_pattern = "{name}-{version}-{target}.tar.gz"
+checksum_asset_pattern = "{name}-{version}-{target}.tar.gz.sha256"
+binary = "{name}-{version}-{target}/rg"
+man_pages = ["{name}-{version}-{target}/doc/rg.1"]
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
 "macos-aarch64" = "aarch64-apple-darwin"
 ```
 
@@ -133,14 +409,20 @@ Supported template placeholders:
 - `{version}`
 - `{target}`
 
-## Security Model
+## Safety Model
 
-`scpr` currently trusts plugin definitions you provide and verifies release downloads with SHA-256 using either:
+`scpr` currently verifies release downloads with SHA-256 using either:
 
-- GitHub release asset metadata when available
-- a configured checksum sidecar asset such as `*.sha256`
+- GitHub asset digest metadata
+- a plugin-configured checksum sidecar asset such as `*.sha256`
 
-It does not currently verify signatures beyond checksums, and it assumes the plugin definition points at the correct binary and checksum assets.
+It also:
+
+- stages binary/man page replacements before swapping them into place
+- uses a lock file to reduce concurrent state-write races
+- keeps package metadata and movement history in local state
+
+It does not currently verify signatures beyond checksums, and it assumes plugin definitions point to the correct release assets.
 
 ## Development
 
@@ -159,13 +441,15 @@ Recent test coverage includes:
 - lock-file lifecycle for concurrent state protection
 - installer file commit behavior
 - uninstall cleanup for tracked files and state
+- audit detection for modified binaries
+- package history recording for pin/remove actions
 - package request parsing for `name@tag` and `--tag`
 
-## Limitations
+## Current Limitations
 
 - GitHub releases are the only supported source today.
-- `update --all` always targets the latest release for each installed package.
-- Plugin definitions are intentionally simple and currently tuned for common release archive layouts.
+- `update --all` targets the latest release for each non-pinned package.
+- plugin definitions are still intentionally simple and tuned for common release archive layouts.
 
 ## License
 

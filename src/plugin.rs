@@ -63,6 +63,16 @@ impl Plugin {
         self.targets.as_ref()?.get(&key).cloned()
     }
 
+    pub fn available_target_keys(&self) -> Vec<String> {
+        let mut keys = self
+            .targets
+            .as_ref()
+            .map(|targets| targets.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        keys.sort();
+        keys
+    }
+
     /// Expand a template string replacing all supported placeholders.
     ///
     /// `tag` is the raw GitHub tag (e.g. "14.1.0" or "v1.2.0");
@@ -177,13 +187,21 @@ pub fn find_plugin(name: &str, dirs: &[impl AsRef<str>]) -> Result<Plugin> {
 pub fn load_plugins_from_dirs(dirs: &[impl AsRef<str>]) -> Result<Vec<Plugin>> {
     let mut load_errors = Vec::new();
     let mut collected_plugins = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::HashMap::new();
 
     for dir in dirs {
         match load_plugins_from_dir(dir.as_ref()) {
             Ok(plugins) => {
                 for plugin in plugins {
-                    if seen.insert(plugin.name.clone()) {
+                    if let Some(previous_dir) = seen.get(&plugin.name) {
+                        tracing::warn!(
+                            "Plugin '{}' from '{}' is shadowed by earlier plugin directory '{}'",
+                            plugin.name,
+                            dir.as_ref(),
+                            previous_dir
+                        );
+                    } else {
+                        seen.insert(plugin.name.clone(), dir.as_ref().to_string());
                         collected_plugins.push(plugin);
                     }
                 }
