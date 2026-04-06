@@ -2,7 +2,7 @@
 name = "skim"
 alias = ["skim", "sk"]
 description = "A fuzzy finder in Rust"
-location = "github:lotabout/skim"
+location = "github:skim-rs/skim"
 asset_pattern = "skim-{target}.tar.xz"
 checksum_asset_pattern = "skim-{target}.tar.xz.sha256"
 binary = "skim-{target}/sk"

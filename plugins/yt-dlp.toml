@@ -1,0 +1,16 @@
+[plugin]
+name = "yt-dlp"
+alias = ["yt-dlp"]
+description = "A feature-rich command-line audio/video downloader"
+location = "github:yt-dlp/yt-dlp"
+asset_pattern = "yt-dlp{target}"
+checksum_asset_pattern = "SHA2-256SUMS"
+binary = "yt-dlp"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "_musllinux"
+"linux-aarch64" = "_musllinux_aarch64"
+"macos-x86_64" = "_macos"
+"macos-aarch64" = "_macos"
+"windows-x86_64" = ".exe"

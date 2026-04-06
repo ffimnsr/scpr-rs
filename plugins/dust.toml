@@ -1,0 +1,13 @@
+[plugin]
+name = "dust"
+alias = ["dust"]
+description = "A more intuitive version of du in Rust"
+location = "github:bootandy/dust"
+asset_pattern = "dust-v{version}-{target}.tar.gz"
+binary = "dust-v{version}-{target}/dust"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"

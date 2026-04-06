@@ -1,0 +1,15 @@
+[plugin]
+name = "just"
+alias = ["just"]
+description = "Just a command runner"
+location = "github:casey/just"
+asset_pattern = "just-{version}-{target}.tar.gz"
+checksum_asset_pattern = "SHA256SUMS"
+binary = "just"
+man_pages = ["just.1"]
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"

@@ -1,0 +1,16 @@
+[plugin]
+name = "rclone"
+alias = ["rclone"]
+description = "Rsync for cloud storage"
+location = "github:rclone/rclone"
+asset_pattern = "rclone-v{version}-{target}.zip"
+checksum_asset_pattern = "SHA256SUMS"
+binary = "rclone-v{version}-{target}/rclone"
+man_pages = ["rclone-v{version}-{target}/rclone.1"]
+
+[plugin.targets]
+"linux-x86_64" = "linux-amd64"
+"linux-aarch64" = "linux-arm64"
+"macos-x86_64" = "osx-amd64"
+"macos-aarch64" = "osx-arm64"
+"windows-x86_64" = "windows-amd64"

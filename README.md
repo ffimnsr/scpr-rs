@@ -26,6 +26,11 @@ Bundled plugins currently include:
 - `starship`
 - `fzf`
 - `skim`
+- `yt-dlp`
+- `grex`
+- `just`
+- `dust`
+- `rclone`
 - `hyperfine`
 - `jq`
 - `lsd`
