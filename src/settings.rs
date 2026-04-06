@@ -12,6 +12,7 @@ struct FileSettings {
     #[serde(default)]
     plugin_dirs: Vec<String>,
     index_ttl_secs: Option<u64>,
+    lock_stale_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,12 +22,24 @@ pub struct AppSettings {
     data_dir: PathBuf,
     plugin_dirs: Vec<String>,
     index_ttl_secs: Option<u64>,
+    lock_stale_after_secs: u64,
 }
 
 impl AppSettings {
     pub fn load() -> Result<Self> {
         let home = dirs::home_dir().context("Failed to determine home directory")?;
-        let config_dir = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+        let config_dir = resolve_xdg_dir(
+            env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+            dirs::config_dir(),
+            &home,
+            ".config",
+        );
+        let data_home = resolve_xdg_dir(
+            env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+            dirs::data_local_dir(),
+            &home,
+            ".local/share",
+        );
         let config_file = config_dir.join("scpr").join("config.toml");
         let file_settings = load_file_settings(&config_file)?;
 
@@ -37,8 +50,8 @@ impl AppSettings {
         let man_dir = env::var_os("SCPR_MAN_DIR")
             .map(PathBuf::from)
             .or(file_settings.man_dir)
-            .unwrap_or_else(|| home.join(".local/share/man/man1"));
-        let data_dir = home.join(".local/share/scpr");
+            .unwrap_or_else(|| data_home.join("man").join("man1"));
+        let data_dir = data_home.join("scpr");
 
         let mut plugin_dirs = env::var_os("SCPR_PLUGINS_DIR")
             .map(|value| {
@@ -55,6 +68,11 @@ impl AppSettings {
             data_dir,
             plugin_dirs,
             index_ttl_secs: Some(file_settings.index_ttl_secs.unwrap_or(600)),
+            lock_stale_after_secs: env::var("SCPR_LOCK_STALE_AFTER_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .or(file_settings.lock_stale_after_secs)
+                .unwrap_or(300),
         })
     }
 
@@ -74,12 +92,27 @@ impl AppSettings {
         self.index_ttl_secs
     }
 
+    pub fn lock_stale_after_secs(&self) -> u64 {
+        self.lock_stale_after_secs
+    }
+
     pub fn default_plugin_dirs(&self) -> Vec<String> {
         let mut dirs = self.plugin_dirs.clone();
         dirs.push(self.data_dir.join("plugins").to_string_lossy().to_string());
         dirs.push("plugins".to_string());
         dirs
     }
+}
+
+fn resolve_xdg_dir(
+    env_value: Option<PathBuf>,
+    dirs_value: Option<PathBuf>,
+    home: &Path,
+    fallback_suffix: &str,
+) -> PathBuf {
+    env_value
+        .or(dirs_value)
+        .unwrap_or_else(|| home.join(fallback_suffix))
 }
 
 fn load_file_settings(path: &Path) -> Result<FileSettings> {
@@ -95,15 +128,35 @@ fn load_file_settings(path: &Path) -> Result<FileSettings> {
 
 #[cfg(test)]
 mod tests {
-    use super::load_file_settings;
+    use super::{load_file_settings, resolve_xdg_dir};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn test_load_file_settings_defaults_when_missing() {
-        let path = std::path::Path::new("tests/does-not-exist.toml");
+        let path = Path::new("tests/does-not-exist.toml");
         let settings = load_file_settings(path).unwrap();
         assert!(settings.install_dir.is_none());
         assert!(settings.man_dir.is_none());
         assert!(settings.plugin_dirs.is_empty());
         assert!(settings.index_ttl_secs.is_none());
+        assert!(settings.lock_stale_after_secs.is_none());
+    }
+
+    #[test]
+    fn test_resolve_xdg_dir_prefers_explicit_env_value() {
+        let resolved = resolve_xdg_dir(
+            Some(PathBuf::from("/tmp/config")),
+            Some(PathBuf::from("/ignored")),
+            Path::new("/home/alice"),
+            ".config",
+        );
+        assert_eq!(resolved, PathBuf::from("/tmp/config"));
+    }
+
+    #[test]
+    fn test_resolve_xdg_dir_falls_back_to_home_suffix() {
+        let resolved =
+            resolve_xdg_dir(None, None, Path::new("/home/alice"), ".local/share");
+        assert_eq!(resolved, PathBuf::from("/home/alice/.local/share"));
     }
 }

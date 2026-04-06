@@ -40,6 +40,19 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+refresh_install_checksum() {
+  local checksum
+  if command -v sha256sum >/dev/null 2>&1; then
+    checksum="$(sha256sum install.sh)"
+  elif command -v shasum >/dev/null 2>&1; then
+    checksum="$(shasum -a 256 install.sh)"
+  else
+    die "need sha256sum or shasum to refresh install.sh.sha256"
+  fi
+
+  printf '%s\n' "$checksum" > install.sh.sha256
+}
+
 ensure_clean_worktree() {
   git diff --quiet --exit-code || die "working tree has unstaged changes"
   git diff --cached --quiet --exit-code || die "index has staged but uncommitted changes"
@@ -200,6 +213,7 @@ main() {
   need_cmd cargo
   need_cmd git
   need_cmd mktemp
+  need_cmd sh
 
   local repo_root
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || die "must be run inside a git repository"
@@ -228,12 +242,13 @@ main() {
 
   update_manifest_version "$version"
   update_lockfile_version "$version"
+  refresh_install_checksum
 
   cargo fmt
   cargo test
   cargo clippy --all-targets --all-features -- -D warnings
 
-  git add Cargo.toml Cargo.lock
+  git add Cargo.toml Cargo.lock install.sh.sha256
   git commit -m "release: $tag_name"
 
   if ((run_publish)); then

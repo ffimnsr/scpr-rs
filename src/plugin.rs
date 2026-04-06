@@ -41,10 +41,18 @@ pub struct Plugin {
     /// Optional checksum asset filename pattern used when release metadata
     /// does not expose an asset digest directly.
     pub checksum_asset_pattern: Option<String>,
+    /// Optional signature asset filename pattern for release verification.
+    pub signature_asset_pattern: Option<String>,
+    /// Signature verification backend: `gpg` or `minisign`.
+    pub signature_format: Option<String>,
+    /// Optional key material or key identifier for signature verification.
+    pub signature_key: Option<String>,
     /// Path to the binary within the extracted archive.
     pub binary: String,
     /// Paths to man pages within the extracted archive.
     pub man_pages: Option<Vec<String>>,
+    /// Optional commands to run after installation.
+    pub post_install: Option<Vec<String>>,
     /// Map from `<os>-<arch>` key to the target triple used in release asset names.
     pub targets: Option<HashMap<String, String>>,
 }
@@ -71,6 +79,10 @@ impl Plugin {
             .unwrap_or_default();
         keys.sort();
         keys
+    }
+
+    pub fn signature_format_name(&self) -> Option<&str> {
+        self.signature_format.as_deref()
     }
 
     /// Expand a template string replacing all supported placeholders.
@@ -238,6 +250,7 @@ mod tests {
         assert!(plugin.description.is_some());
         assert!(plugin.checksum_asset_pattern.is_some());
         assert!(plugin.targets.is_some());
+        assert!(plugin.signature_asset_pattern.is_none());
     }
 
     #[test]
@@ -254,6 +267,7 @@ mod tests {
         assert!(plugins.iter().any(|plugin| plugin.name == "ripgrep"));
         assert!(plugins.iter().any(|plugin| plugin.name == "fd"));
         assert!(plugins.iter().any(|plugin| plugin.name == "jq"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "scpr"));
     }
 
     #[test]

@@ -21,6 +21,7 @@ fn temp_installer() -> Installer {
         local_bin,
         local_man,
         state_file: state_dir.join("state.toml"),
+        lock_stale_after_secs: 300,
     }
 }
 
@@ -34,8 +35,12 @@ fn sample_plugin() -> Plugin {
         checksum_asset_pattern: Some(
             "{name}-{version}-{target}.tar.gz.sha256".to_string(),
         ),
+        signature_asset_pattern: None,
+        signature_format: None,
+        signature_key: None,
         binary: "{name}-{version}-{target}/rg".to_string(),
         man_pages: Some(vec!["{name}-{version}-{target}/doc/rg.1".to_string()]),
+        post_install: None,
         targets: None,
     }
 }
@@ -56,6 +61,19 @@ fn test_parse_sha256_digest_accepts_prefixed_value() {
 fn test_parse_sha256_checksum_file_matches_asset_name() {
     let checksum = parse_sha256_checksum_file(
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  ripgrep.tar.gz",
+        "ripgrep.tar.gz",
+    )
+    .unwrap();
+    assert_eq!(
+        checksum,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
+}
+
+#[test]
+fn test_parse_sha256_checksum_file_accepts_bsd_format() {
+    let checksum = parse_sha256_checksum_file(
+        "SHA256 (ripgrep.tar.gz) = 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "ripgrep.tar.gz",
     )
     .unwrap();
@@ -102,7 +120,7 @@ async fn test_acquire_state_lock_clears_stale_lock() {
     std::fs::write(&lock_path, b"stale").unwrap();
     std::process::Command::new("touch")
         .arg("-d")
-        .arg("2 minutes ago")
+        .arg("10 minutes ago")
         .arg(&lock_path)
         .status()
         .unwrap();
@@ -145,6 +163,24 @@ fn test_commit_install_writes_binary_and_man_page() {
         std::fs::read(installer.local_man_dir().join("rg.1")).unwrap(),
         b"manual"
     );
+}
+
+#[test]
+fn test_commit_install_cleans_orphaned_backup_files() {
+    let installer = temp_installer();
+    let backup_path = installer
+        .local_bin_dir()
+        .join(format!("rg.scpr-old.{}.0", std::process::id()));
+    std::fs::write(&backup_path, b"stale").unwrap();
+
+    let payload = InstallPayload {
+        binary_filename: "rg".to_string(),
+        binary_contents: b"binary".to_vec(),
+        man_pages: Vec::new(),
+    };
+
+    let _installed = installer.commit_install(payload).unwrap();
+    assert!(!backup_path.exists());
 }
 
 #[test]
@@ -249,6 +285,77 @@ fn test_pin_records_history() {
         history.last().unwrap().action,
         HistoryAction::Pinned
     ));
+}
+
+#[test]
+fn test_rollback_version_returns_previous_installed_version() {
+    let installer = temp_installer();
+    installer
+        .save_state(&State {
+            version: STATE_VERSION,
+            installed: vec![InstalledPackage {
+                name: "ripgrep".to_string(),
+                version: "v2".to_string(),
+                binary: "rg".to_string(),
+                source: None,
+                target: None,
+                asset_name: None,
+                checksum_sha256: Some("a".repeat(64)),
+                man_pages: Vec::new(),
+                installed_at_unix: Some(1),
+                pinned: false,
+            }],
+            history: vec![super::HistoryEvent {
+                package: "ripgrep".to_string(),
+                action: HistoryAction::Updated,
+                timestamp_unix: 2,
+                version: Some("v2".to_string()),
+                from_version: Some("v1".to_string()),
+                to_version: Some("v2".to_string()),
+                detail: None,
+            }],
+        })
+        .unwrap();
+
+    assert_eq!(installer.rollback_version("ripgrep").unwrap(), "v1");
+}
+
+#[test]
+fn test_restore_state_writes_backup_before_overwrite() {
+    let installer = temp_installer();
+    installer
+        .save_state(&State {
+            version: STATE_VERSION,
+            installed: vec![InstalledPackage {
+                name: "ripgrep".to_string(),
+                version: "v1".to_string(),
+                binary: "rg".to_string(),
+                source: None,
+                target: None,
+                asset_name: None,
+                checksum_sha256: Some("a".repeat(64)),
+                man_pages: Vec::new(),
+                installed_at_unix: Some(1),
+                pinned: false,
+            }],
+            history: Vec::new(),
+        })
+        .unwrap();
+
+    let replacement = toml::to_string(&State {
+        version: STATE_VERSION,
+        installed: Vec::new(),
+        history: Vec::new(),
+    })
+    .unwrap();
+    installer
+        .restore_state(&replacement, StateFormat::Toml)
+        .unwrap();
+
+    let backup =
+        std::fs::read_to_string(installer.state_file_path().with_extension("toml.bak"))
+            .unwrap();
+    assert!(backup.contains("ripgrep"));
 }
 
 #[test]

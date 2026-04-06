@@ -16,6 +16,7 @@ It is built for tools like `ripgrep`, `fd`, or other projects that ship release 
 
 Bundled plugins currently include:
 
+- `scpr`
 - `ripgrep`
 - `fd`
 - `bat`
@@ -37,6 +38,15 @@ Install `scpr` with the official script:
 
 ```sh
 curl -sSfL https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh | sh
+```
+
+If you want to verify the bootstrap script before running it:
+
+```sh
+curl -sSfLO https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh
+curl -sSfLO https://raw.githubusercontent.com/ffimnsr/scpr-rs/main/install.sh.sha256
+sha256sum -c install.sh.sha256
+sh install.sh
 ```
 
 If you prefer Cargo:
@@ -123,6 +133,8 @@ Update one package:
 ```bash
 scpr update ripgrep
 scpr update ripgrep --target aarch64-apple-darwin
+scpr update scpr
+scpr rollback ripgrep
 ```
 
 Update everything except pinned packages:
@@ -141,6 +153,14 @@ scpr update --all --dry-run
 scpr uninstall ripgrep --dry-run
 ```
 
+List available release tags before choosing one:
+
+```bash
+scpr versions ripgrep
+scpr versions ripgrep --json
+scpr install --list-versions ripgrep
+```
+
 Force-refresh remote plugin indexes instead of waiting for the cache TTL:
 
 ```bash
@@ -157,6 +177,8 @@ scpr list
 scpr status
 scpr list --outdated
 ```
+
+`list` and `status` include per-binary disk usage and a total binary footprint summary.
 
 List packages with newer releases available:
 
@@ -205,6 +227,7 @@ View package movement over time:
 scpr history
 scpr history ripgrep
 scpr history --limit 20
+scpr history --since 2026-01-01
 scpr history --graph
 scpr history clear
 scpr history clear ripgrep
@@ -224,6 +247,8 @@ Pin a package so `update --all` skips it:
 ```bash
 scpr pin ripgrep
 scpr unpin ripgrep
+scpr hold ripgrep
+scpr release ripgrep
 ```
 
 ### Plugin discovery
@@ -238,12 +263,15 @@ Search available plugins:
 
 ```bash
 scpr plugins search rip
+scpr plugins search rip --remote
 ```
 
 Inspect a plugin definition:
 
 ```bash
 scpr plugins info ripgrep
+scpr plugins validate ./plugins/ripgrep.toml
+scpr plugins test ./plugins/ripgrep.toml
 ```
 
 Generate a best-effort plugin skeleton from a GitHub repo:
@@ -273,6 +301,8 @@ scpr plugins index sync ffimnsr/scpr-plugins
 scpr plugins index remove ffimnsr/scpr-plugins
 ```
 
+`plugins index sync` prints a per-index diff summary showing which plugins were added, updated, or removed.
+
 Use an additional plugin directory:
 
 ```bash
@@ -286,6 +316,7 @@ Configuration sources:
 - `SCPR_PLUGINS_DIR` with standard path separators for extra plugin directories
 - `SCPR_BIN_DIR` to override the binary install directory
 - `~/.config/scpr/config.toml` for persistent settings such as `install_dir`, `man_dir`, `plugin_dirs`, and `index_ttl_secs`
+- `~/.config/scpr/config.toml` for persistent settings such as `install_dir`, `man_dir`, `plugin_dirs`, `index_ttl_secs`, and `lock_stale_after_secs`
 
 Remote index notes:
 
@@ -324,8 +355,12 @@ description = "A fast line-oriented search tool"
 location = "github:BurntSushi/ripgrep"
 asset_pattern = "{name}-{version}-{target}.tar.gz"
 checksum_asset_pattern = "{name}-{version}-{target}.tar.gz.sha256"
+signature_asset_pattern = "{name}-{version}-{target}.tar.gz.minisig"
+signature_format = "minisign"
+signature_key = "RWQf6LRCGA9QpT/a4LhEYu..."
 binary = "{name}-{version}-{target}/rg"
 man_pages = ["{name}-{version}-{target}/doc/rg.1"]
+post_install = ["{binary_path} --generate complete-bash > ~/.local/share/bash-completion/completions/rg"]
 
 [plugin.targets]
 "linux-x86_64" = "x86_64-unknown-linux-musl"
@@ -365,6 +400,7 @@ Adjust CLI verbosity without setting `RUST_LOG` manually:
 scpr -q list
 scpr -v install ripgrep
 scpr -vv plugins list
+scpr --log-format json -v update --all
 ```
 
 Export or restore state when moving to a new machine:
@@ -385,18 +421,18 @@ scpr completions fish
 
 ## Storage Layout
 
-By default `scpr` uses:
+By default `scpr` uses XDG config/data directories when available:
 
 - binaries: `~/.local/bin`
-- man pages: `~/.local/share/man/man1`
-- state file: `~/.local/share/scpr/state.toml`
-- user plugin definitions: `~/.local/share/scpr/plugins`
+- man pages: `${XDG_DATA_HOME:-~/.local/share}/man/man1`
+- state file: `${XDG_DATA_HOME:-~/.local/share}/scpr/state.toml`
+- user plugin definitions: `${XDG_DATA_HOME:-~/.local/share}/scpr/plugins`
 - local development plugin definitions: `./plugins`
 
 Persistent configuration lives at:
 
-- config file: `~/.config/scpr/config.toml`
-- remote index config: `~/.local/share/scpr/remote-indexes.toml`
+- config file: `${XDG_CONFIG_HOME:-~/.config}/scpr/config.toml`
+- remote index config: `${XDG_DATA_HOME:-~/.local/share}/scpr/remote-indexes.toml`
 
 Example config:
 
@@ -405,6 +441,7 @@ install_dir = "/home/alice/.local/bin"
 man_dir = "/home/alice/.local/share/man/man1"
 plugin_dirs = ["/home/alice/.config/scpr/plugins", "/opt/scpr/plugins"]
 index_ttl_secs = 600
+lock_stale_after_secs = 300
 ```
 
 ## Plugin Format
@@ -438,6 +475,17 @@ Supported template placeholders:
 - `{version}`
 - `{target}`
 
+Optional signature fields:
+
+- `signature_asset_pattern`
+- `signature_format` as `gpg` or `minisign`
+- `signature_key` for minisign public keys or other verifier-specific key material
+
+Optional install customization:
+
+- `man_pages` can preserve section subdirectories such as `man8/tool.8`
+- `post_install` runs shell commands after installation with `{binary_path}`, `{binary_name}`, and `{plugin}` placeholders
+
 ## Safety Model
 
 `scpr` currently verifies release downloads with SHA-256 using either:
@@ -445,11 +493,21 @@ Supported template placeholders:
 - GitHub asset digest metadata
 - a plugin-configured checksum sidecar asset such as `*.sha256`
 
+It can also verify optional detached signatures when a plugin defines:
+
+- `signature_asset_pattern` with `signature_format = "gpg"`
+- `signature_asset_pattern` with `signature_format = "minisign"` and `signature_key`
+
 It also:
 
 - stages binary/man page replacements before swapping them into place
 - uses a lock file to reduce concurrent state-write races
 - keeps package metadata and movement history in local state
+
+Archive support notes:
+
+- `.tar.bz2` and `.tbz2` are decompressed in-process via the Rust `bzip2` crate
+- no external `bzip2` command is required at runtime, but builds still depend on the crate being available for the target platform
 
 It does not currently verify signatures beyond checksums, and it assumes plugin definitions point to the correct release assets.
 
@@ -466,6 +524,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 Recent test coverage includes:
 
 - plugin parsing and target/template resolution
+- XDG path resolution and log-format parsing
 - checksum parsing and validation helpers
 - lock-file lifecycle for concurrent state protection
 - installer file commit behavior

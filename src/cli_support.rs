@@ -1,5 +1,5 @@
 use crate::{github, installer, plugin, remote_index, settings};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures_util::future;
 use serde::Serialize;
 use std::{path::Path, sync::Arc};
@@ -10,6 +10,12 @@ pub(crate) struct OutdatedPackage {
     pub(crate) name: String,
     pub(crate) current_version: String,
     pub(crate) latest_version: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct OutdatedPackagesReport {
+    pub(crate) outdated: Vec<OutdatedPackage>,
+    pub(crate) failures: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -26,15 +32,44 @@ pub(crate) struct PackageRequest {
     pub(crate) tag: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub(crate) struct InstalledPackageStatus {
     pub(crate) name: String,
     pub(crate) version: String,
     pub(crate) binary: String,
+    pub(crate) binary_size_bytes: Option<u64>,
     pub(crate) pinned: bool,
     pub(crate) installed_at_unix: Option<u64>,
     pub(crate) latest_version: Option<String>,
     pub(crate) outdated: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct InstalledPackageRow {
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) binary: String,
+    pub(crate) binary_size_bytes: Option<u64>,
+    pub(crate) pinned: bool,
+    pub(crate) installed_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct InstalledPackagesReport<T> {
+    pub(crate) packages: Vec<T>,
+    pub(crate) total_disk_usage_bytes: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct PluginValidationReport {
+    pub(crate) plugin: plugin::Plugin,
+    pub(crate) resolved_target: Option<String>,
+    pub(crate) expanded_asset: Option<String>,
+    pub(crate) expanded_checksum: Option<String>,
+    pub(crate) expanded_signature: Option<String>,
+    pub(crate) expanded_binary: Option<String>,
+    pub(crate) expanded_man_pages: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 pub(crate) fn add_plugins_dir_arg(dirs: &mut Vec<String>, extra: Option<&String>) {
@@ -134,6 +169,124 @@ pub(crate) fn parse_repo_arg(repo: &str) -> Result<(&str, &str)> {
     Ok((owner, name))
 }
 
+pub(crate) async fn list_plugin_versions(
+    client: &github::GithubClient,
+    plugin: &plugin::Plugin,
+) -> Result<Vec<String>> {
+    let (owner, repo) = plugin.github_repo().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Plugin '{}' has an invalid location '{}'; expected 'github:<owner>/<repo>'",
+            plugin.name,
+            plugin.location
+        )
+    })?;
+    client.list_release_tags(owner, repo).await
+}
+
+pub(crate) fn validate_plugin_file(path: &str) -> Result<PluginValidationReport> {
+    let plugin = plugin::parse(path)?;
+    let mut warnings = Vec::new();
+
+    if plugin.name.trim().is_empty() {
+        anyhow::bail!("plugin.name must not be empty");
+    }
+    if plugin.asset_pattern.trim().is_empty() {
+        anyhow::bail!("plugin.asset_pattern must not be empty");
+    }
+    if plugin.binary.trim().is_empty() {
+        anyhow::bail!("plugin.binary must not be empty");
+    }
+    plugin.github_repo().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Plugin '{}' has an invalid location '{}'; expected 'github:<owner>/<repo>'",
+            plugin.name,
+            plugin.location
+        )
+    })?;
+    if plugin.signature_asset_pattern.is_some() && plugin.signature_format.is_none() {
+        anyhow::bail!(
+            "plugin.signature_format is required when plugin.signature_asset_pattern is set"
+        );
+    }
+    if let Some(format) = plugin.signature_format_name()
+        && !matches!(format, "gpg" | "minisign")
+    {
+        anyhow::bail!("plugin.signature_format must be either 'gpg' or 'minisign'");
+    }
+    if plugin.alias.iter().any(|alias| alias.trim().is_empty()) {
+        anyhow::bail!("plugin.alias entries must not be empty");
+    }
+
+    let sample_tag = "v0.0.0";
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let resolved_target = plugin.resolve_target(os, arch);
+    let (
+        expanded_asset,
+        expanded_checksum,
+        expanded_signature,
+        expanded_binary,
+        expanded_man_pages,
+    ) = if let Some(target) = resolved_target.as_deref() {
+        let expanded_asset =
+            plugin.expand_template(&plugin.asset_pattern, sample_tag, target);
+        let expanded_checksum = plugin
+            .checksum_asset_pattern
+            .as_deref()
+            .map(|pattern| plugin.expand_template(pattern, sample_tag, target));
+        let expanded_signature = plugin
+            .signature_asset_pattern
+            .as_deref()
+            .map(|pattern| plugin.expand_template(pattern, sample_tag, target));
+        let expanded_binary = plugin.expand_template(&plugin.binary, sample_tag, target);
+        let expanded_man_pages = plugin
+            .man_pages
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|pattern| plugin.expand_template(pattern, sample_tag, target))
+            .collect::<Vec<_>>();
+        (
+            Some(expanded_asset),
+            expanded_checksum,
+            expanded_signature,
+            Some(expanded_binary),
+            expanded_man_pages,
+        )
+    } else {
+        warnings.push(format!(
+            "Current platform {os}/{arch} is not configured in [plugin.targets]"
+        ));
+        (None, None, None, None, Vec::new())
+    };
+
+    for (label, value) in [
+        ("asset_pattern", expanded_asset.as_deref()),
+        ("checksum_asset_pattern", expanded_checksum.as_deref()),
+        ("signature_asset_pattern", expanded_signature.as_deref()),
+        ("binary", expanded_binary.as_deref()),
+    ] {
+        if let Some(value) = value
+            && value.contains('{')
+        {
+            warnings.push(format!(
+                "{label} still contains an unresolved template placeholder: {value}"
+            ));
+        }
+    }
+
+    Ok(PluginValidationReport {
+        plugin,
+        resolved_target,
+        expanded_asset,
+        expanded_checksum,
+        expanded_signature,
+        expanded_binary,
+        expanded_man_pages,
+        warnings,
+    })
+}
+
 pub(crate) fn preferred_remote_pin_for_query(
     manager: &remote_index::RemoteIndexManager,
     query: &str,
@@ -207,6 +360,24 @@ pub(crate) async fn collect_outdated_packages(
     filter_name: Option<&str>,
     skip_pinned: bool,
 ) -> Result<Vec<OutdatedPackage>> {
+    Ok(collect_outdated_packages_report(
+        installer,
+        client,
+        dirs,
+        filter_name,
+        skip_pinned,
+    )
+    .await?
+    .outdated)
+}
+
+pub(crate) async fn collect_outdated_packages_report(
+    installer: &installer::Installer,
+    client: &github::GithubClient,
+    dirs: &[String],
+    filter_name: Option<&str>,
+    skip_pinned: bool,
+) -> Result<OutdatedPackagesReport> {
     let client = Arc::new(client);
     let all_installed = installer.list_installed()?;
     let filter_name = filter_name.map(str::to_string);
@@ -228,10 +399,7 @@ pub(crate) async fn collect_outdated_packages(
                 let _permit = sem.acquire().await.ok()?;
                 let manager = match remote_index::RemoteIndexManager::new() {
                     Ok(manager) => manager,
-                    Err(err) => {
-                        warn!("Skipping '{}' during update check: {err}", installed.name);
-                        return None;
-                    }
+                    Err(err) => return Some(Err((installed.name, err.to_string()))),
                 };
                 let mut package_dirs = dirs;
                 if let Err(err) = apply_preferred_remote_pin_to_dirs(
@@ -240,24 +408,31 @@ pub(crate) async fn collect_outdated_packages(
                     &installed.name,
                     false,
                 ) {
-                    warn!("Skipping '{}' during update check: {err}", installed.name);
-                    return None;
+                    return Some(Err((installed.name, err.to_string())));
                 }
                 let plugin = match plugin::find_plugin(&installed.name, &package_dirs) {
                     Ok(p) => p,
-                    Err(err) => {
-                        warn!("Skipping '{}' during update check: {err}", installed.name);
-                        return None;
-                    }
+                    Err(err) => return Some(Err((installed.name, err.to_string()))),
                 };
-                let (owner, repo) = plugin.github_repo()?;
-                let release = client.get_latest_release(owner, repo).await.ok()?;
+                let Some((owner, repo)) = plugin.github_repo() else {
+                    return Some(Err((
+                        installed.name,
+                        format!(
+                            "Plugin '{}' has an invalid location '{}'",
+                            plugin.name, plugin.location
+                        ),
+                    )));
+                };
+                let release = match client.get_latest_release(owner, repo).await {
+                    Ok(release) => release,
+                    Err(err) => return Some(Err((installed.name, err.to_string()))),
+                };
                 if release.tag_name != installed.version {
-                    Some(OutdatedPackage {
+                    Some(Ok(OutdatedPackage {
                         name: installed.name,
                         current_version: installed.version,
                         latest_version: release.tag_name,
-                    })
+                    }))
                 } else {
                     None
                 }
@@ -265,16 +440,24 @@ pub(crate) async fn collect_outdated_packages(
         })
         .collect();
 
-    let mut outdated: Vec<OutdatedPackage> = future::join_all(futures)
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
+    let mut outdated = Vec::new();
+    let mut failures = Vec::new();
+    for result in future::join_all(futures).await.into_iter().flatten() {
+        match result {
+            Ok(package) => outdated.push(package),
+            Err((name, err)) => {
+                warn!("Skipping '{name}' during update check: {err}");
+                failures.push((name, err));
+            }
+        }
+    }
     outdated.sort_by(|l, r| l.name.cmp(&r.name));
-    Ok(outdated)
+    failures.sort_by(|l, r| l.0.cmp(&r.0));
+    Ok(OutdatedPackagesReport { outdated, failures })
 }
 
 pub(crate) fn build_installed_status_rows(
+    installer: &installer::Installer,
     installed: Vec<installer::InstalledPackage>,
     outdated: &[OutdatedPackage],
 ) -> Vec<InstalledPackageStatus> {
@@ -293,6 +476,9 @@ pub(crate) fn build_installed_status_rows(
             InstalledPackageStatus {
                 name: pkg.name,
                 version: pkg.version.clone(),
+                binary_size_bytes: binary_size_bytes(
+                    installer.local_bin_dir().join(&pkg.binary).as_path(),
+                ),
                 binary: pkg.binary,
                 pinned: pkg.pinned,
                 installed_at_unix: pkg.installed_at_unix,
@@ -305,8 +491,30 @@ pub(crate) fn build_installed_status_rows(
     rows
 }
 
-pub(crate) fn build_doctor_checks(
+pub(crate) fn build_installed_package_rows(
     installer: &installer::Installer,
+    installed: Vec<installer::InstalledPackage>,
+) -> Vec<InstalledPackageRow> {
+    let mut rows = installed
+        .into_iter()
+        .map(|pkg| InstalledPackageRow {
+            name: pkg.name,
+            version: pkg.version,
+            binary_size_bytes: binary_size_bytes(
+                installer.local_bin_dir().join(&pkg.binary).as_path(),
+            ),
+            binary: pkg.binary,
+            pinned: pkg.pinned,
+            installed_at_unix: pkg.installed_at_unix,
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    rows
+}
+
+pub(crate) async fn build_doctor_checks(
+    installer: &installer::Installer,
+    client: &github::GithubClient,
     plugin_dirs: &[String],
 ) -> Result<Vec<DoctorCheck>> {
     let mut checks = Vec::new();
@@ -319,12 +527,7 @@ pub(crate) fn build_doctor_checks(
         name: "PATH",
         ok: path_has_local_bin,
         detail: format!("{} in PATH", local_bin.display()),
-        remediation: (!path_has_local_bin).then(|| {
-            format!(
-                "Add this to your shell profile, then restart your shell:\n  export PATH=\"{}:$PATH\"",
-                local_bin.display()
-            )
-        }),
+        remediation: (!path_has_local_bin).then(|| suggested_path_export(local_bin)),
     });
 
     let state_file = installer.state_file_path();
@@ -359,6 +562,30 @@ pub(crate) fn build_doctor_checks(
             format!(
                 "Reinstall the affected packages, or inspect drift with `scpr audit`.\n  scpr install {}",
                 missing_binaries.join(" ")
+            )
+        }),
+    });
+
+    let broken_symlinks = collect_broken_symlinks(installer.local_bin_dir())?;
+    checks.push(DoctorCheck {
+        name: "Broken Links",
+        ok: broken_symlinks.is_empty(),
+        detail: if broken_symlinks.is_empty() {
+            "No broken symlinks in install directory".to_string()
+        } else {
+            format!(
+                "Broken symlinks: {}",
+                broken_symlinks
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        },
+        remediation: (!broken_symlinks.is_empty()).then(|| {
+            format!(
+                "Remove or recreate the broken entries in {}.",
+                installer.local_bin_dir().display()
             )
         }),
     });
@@ -437,7 +664,84 @@ pub(crate) fn build_doctor_checks(
         }),
     });
 
+    let rate_limit = client.get_rate_limit_status().await;
+    checks.push(match rate_limit {
+        Ok(core) => DoctorCheck {
+            name: "GitHub API",
+            ok: core.remaining >= 10,
+            detail: format!(
+                "{} / {} requests remaining (reset at Unix epoch {})",
+                core.remaining, core.limit, core.reset
+            ),
+            remediation: (core.remaining < 10).then(|| {
+                "Export a valid GITHUB_TOKEN or wait for the GitHub API rate limit to reset before running large installs or updates.".to_string()
+            }),
+        },
+        Err(err) => DoctorCheck {
+            name: "GitHub API",
+            ok: false,
+            detail: format!("Failed to query GitHub rate limit: {err}"),
+            remediation: Some(
+                "Check network connectivity and GitHub authentication before relying on remote installs.".to_string(),
+            ),
+        },
+    });
+
     Ok(checks)
+}
+
+fn collect_broken_symlinks(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut broken = Vec::new();
+    if !dir.exists() {
+        return Ok(broken);
+    }
+
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("Failed to read install dir {}", dir.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("Failed to read entry in {}", dir.display()))?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("Failed to inspect {}", path.display()))?;
+        if metadata.file_type().is_symlink() && !path.exists() {
+            broken.push(path);
+        }
+    }
+
+    broken.sort();
+    Ok(broken)
+}
+
+fn suggested_path_export(local_bin: &Path) -> String {
+    let profile = preferred_shell_profile();
+    format!(
+        "Add this to {} and restart your shell:\n  export PATH=\"{}:$PATH\"",
+        profile,
+        local_bin.display()
+    )
+}
+
+fn preferred_shell_profile() -> String {
+    let home = dirs::home_dir();
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let file = if shell.ends_with("/zsh") {
+        ".zshrc"
+    } else if shell.ends_with("/bash") {
+        ".bashrc"
+    } else if shell.ends_with("/fish") {
+        "config.fish"
+    } else {
+        ".profile"
+    };
+
+    match (home, file) {
+        (Some(home), "config.fish") => {
+            home.join(".config/fish/config.fish").display().to_string()
+        }
+        (Some(home), file) => home.join(file).display().to_string(),
+        (None, file) => file.to_string(),
+    }
 }
 
 pub(crate) fn matches_query(plugin: &plugin::Plugin, query: Option<&str>) -> bool {
@@ -493,48 +797,15 @@ pub(crate) fn print_available_plugins(plugins: &[plugin::Plugin], json: bool) {
     }
 }
 
-pub(crate) fn print_installed_packages(
-    installed: &[installer::InstalledPackage],
-    json: bool,
-) {
+pub(crate) fn print_installed_packages(rows: &[InstalledPackageRow], json: bool) {
+    let total_disk_usage_bytes =
+        rows.iter().filter_map(|row| row.binary_size_bytes).sum();
     if json {
-        println!("{}", serde_json::to_string_pretty(installed).unwrap());
-        return;
-    }
-
-    if installed.is_empty() {
-        println!("No packages installed.");
-        return;
-    }
-
-    println!(
-        "{:<20} {:<20} {:<20} {:<12} Installed",
-        "Package", "Version", "Binary", "Pinned"
-    );
-    println!("{}", "-".repeat(85));
-    for pkg in installed {
-        let installed_date = pkg
-            .installed_at_unix
-            .map(|ts| {
-                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(ts as i64, 0)
-                    .unwrap_or_default();
-                dt.format("%Y-%m-%d").to_string()
-            })
-            .unwrap_or_else(|| "-".to_string());
-        println!(
-            "{:<20} {:<20} {:<20} {:<12} {}",
-            pkg.name,
-            pkg.version,
-            pkg.binary,
-            if pkg.pinned { "yes" } else { "no" },
-            installed_date
-        );
-    }
-}
-
-pub(crate) fn print_installed_status_rows(rows: &[InstalledPackageStatus], json: bool) {
-    if json {
-        println!("{}", serde_json::to_string_pretty(rows).unwrap());
+        let report = InstalledPackagesReport {
+            packages: rows.to_vec(),
+            total_disk_usage_bytes,
+        };
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
         return;
     }
 
@@ -544,10 +815,59 @@ pub(crate) fn print_installed_status_rows(rows: &[InstalledPackageStatus], json:
     }
 
     println!(
-        "{:<20} {:<20} {:<20} {:<12} {:<20} {:<12} Latest",
-        "Package", "Version", "Binary", "Pinned", "Installed", "Status"
+        "{:<20} {:<20} {:<20} {:<10} {:<12} Installed",
+        "Package", "Version", "Binary", "Size", "Pinned"
     );
-    println!("{}", "-".repeat(124));
+    println!("{}", "-".repeat(100));
+    for pkg in rows {
+        let installed_date = pkg
+            .installed_at_unix
+            .map(|ts| {
+                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(ts as i64, 0)
+                    .unwrap_or_default();
+                dt.format("%Y-%m-%d").to_string()
+            })
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<20} {:<20} {:<20} {:<10} {:<12} {}",
+            pkg.name,
+            pkg.version,
+            pkg.binary,
+            pkg.binary_size_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "-".to_string()),
+            if pkg.pinned { "yes" } else { "no" },
+            installed_date
+        );
+    }
+    println!(
+        "Total binary disk usage: {}",
+        format_bytes(total_disk_usage_bytes)
+    );
+}
+
+pub(crate) fn print_installed_status_rows(rows: &[InstalledPackageStatus], json: bool) {
+    let total_disk_usage_bytes =
+        rows.iter().filter_map(|row| row.binary_size_bytes).sum();
+    if json {
+        let report = InstalledPackagesReport {
+            packages: rows.to_vec(),
+            total_disk_usage_bytes,
+        };
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        return;
+    }
+
+    if rows.is_empty() {
+        println!("No packages installed.");
+        return;
+    }
+
+    println!(
+        "{:<20} {:<20} {:<20} {:<10} {:<12} {:<20} {:<12} Latest",
+        "Package", "Version", "Binary", "Size", "Pinned", "Installed", "Status"
+    );
+    println!("{}", "-".repeat(136));
     for row in rows {
         let installed_date = row
             .installed_at_unix
@@ -558,16 +878,23 @@ pub(crate) fn print_installed_status_rows(rows: &[InstalledPackageStatus], json:
             })
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<20} {:<20} {:<20} {:<12} {:<20} {:<12} {}",
+            "{:<20} {:<20} {:<20} {:<10} {:<12} {:<20} {:<12} {}",
             row.name,
             row.version,
             row.binary,
+            row.binary_size_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "-".to_string()),
             if row.pinned { "yes" } else { "no" },
             installed_date,
             if row.outdated { "outdated" } else { "current" },
             row.latest_version.as_deref().unwrap_or("-")
         );
     }
+    println!(
+        "Total binary disk usage: {}",
+        format_bytes(total_disk_usage_bytes)
+    );
 }
 
 pub(crate) fn print_outdated_packages(packages: &[OutdatedPackage], json: bool) {
@@ -722,6 +1049,14 @@ pub(crate) fn print_plugin_info(plugin: &plugin::Plugin) {
             .as_deref()
             .unwrap_or("GitHub digest only")
     );
+    println!(
+        "Signature Pattern: {}",
+        plugin.signature_asset_pattern.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Signature Format: {}",
+        plugin.signature_format.as_deref().unwrap_or("-")
+    );
     println!("Binary Path: {}", plugin.binary);
     println!(
         "Man Pages: {}",
@@ -748,6 +1083,65 @@ pub(crate) fn print_plugin_info(plugin: &plugin::Plugin) {
         .resolve_target(os, arch)
         .unwrap_or_else(|| "(not configured)".to_string());
     println!("Current Platform: {os}/{arch} -> {resolved}");
+}
+
+pub(crate) fn print_versions(versions: &[String], json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(versions).unwrap());
+        return;
+    }
+    if versions.is_empty() {
+        println!("No release tags found.");
+        return;
+    }
+
+    println!("Available versions:");
+    for version in versions {
+        println!("{version}");
+    }
+}
+
+pub(crate) fn print_plugin_validation(report: &PluginValidationReport) {
+    println!("Plugin file is valid: {}", report.plugin.name);
+    if let Some(target) = &report.resolved_target {
+        println!(
+            "Current platform: {}/{} -> {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            target
+        );
+    } else {
+        println!(
+            "Current platform: {}/{} -> not configured",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+    }
+    if let Some(value) = &report.expanded_asset {
+        println!("Expanded Asset: {value}");
+    }
+    if let Some(value) = &report.expanded_checksum {
+        println!("Expanded Checksum: {value}");
+    }
+    if let Some(value) = &report.expanded_signature {
+        println!("Expanded Signature: {value}");
+    }
+    if let Some(value) = &report.expanded_binary {
+        println!("Expanded Binary: {value}");
+    }
+    if !report.expanded_man_pages.is_empty() {
+        println!(
+            "Expanded Man Pages: {}",
+            report.expanded_man_pages.join(", ")
+        );
+    }
+    if report.warnings.is_empty() {
+        println!("Warnings: none");
+    } else {
+        for warning in &report.warnings {
+            println!("Warning: {warning}");
+        }
+    }
 }
 
 pub(crate) fn print_remote_indexes(
@@ -848,10 +1242,45 @@ fn human_timestamp(timestamp_unix: u64) -> String {
         .to_string()
 }
 
+pub(crate) fn parse_since_date(since: Option<&str>) -> Result<Option<u64>> {
+    let Some(since) = since else {
+        return Ok(None);
+    };
+    let date = chrono::NaiveDate::parse_from_str(since, "%Y-%m-%d")
+        .with_context(|| format!("Invalid date '{since}'. Use YYYY-MM-DD."))?;
+    let dt = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("Invalid date '{since}'. Use YYYY-MM-DD."))?;
+    Ok(Some(dt.and_utc().timestamp() as u64))
+}
+
+fn binary_size_bytes(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_package_request, parse_repo_arg, parse_state_format};
+    use super::{
+        collect_broken_symlinks, parse_package_request, parse_repo_arg, parse_since_date,
+        parse_state_format, suggested_path_export, validate_plugin_file,
+    };
     use crate::installer::StateFormat;
+    use std::path::Path;
 
     #[test]
     fn test_parse_package_request_with_inline_tag() {
@@ -894,5 +1323,50 @@ mod tests {
         let (owner, repo) = parse_repo_arg("github:BurntSushi/ripgrep").unwrap();
         assert_eq!(owner, "BurntSushi");
         assert_eq!(repo, "ripgrep");
+    }
+
+    #[test]
+    fn test_validate_plugin_file_expands_current_platform_templates() {
+        let report = validate_plugin_file("plugins/ripgrep.toml").unwrap();
+        assert_eq!(
+            report.resolved_target.as_deref(),
+            Some("x86_64-unknown-linux-musl")
+        );
+        assert!(
+            report
+                .expanded_asset
+                .as_deref()
+                .unwrap()
+                .contains("ripgrep-0.0.0-x86_64-unknown-linux-musl.tar.gz")
+        );
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_collect_broken_symlinks_finds_dangling_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let link = temp.path().join("broken");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(temp.path().join("missing-target"), &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(temp.path().join("missing-target"), &link)
+            .unwrap();
+
+        let broken = collect_broken_symlinks(temp.path()).unwrap();
+        assert_eq!(broken, vec![link]);
+    }
+
+    #[test]
+    fn test_suggested_path_export_includes_export_line() {
+        let message = suggested_path_export(Path::new("/tmp/bin"));
+        assert!(message.contains("export PATH=\"/tmp/bin:$PATH\""));
+    }
+
+    #[test]
+    fn test_parse_since_date_accepts_yyyy_mm_dd() {
+        assert_eq!(
+            parse_since_date(Some("2026-04-06")).unwrap(),
+            Some(1775433600)
+        );
     }
 }

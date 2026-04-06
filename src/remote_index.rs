@@ -1,6 +1,5 @@
 use crate::{github::GithubClient, settings::AppSettings};
 use anyhow::{Context, Result, anyhow};
-use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -9,8 +8,6 @@ use std::{
 };
 use tempfile::NamedTempFile;
 use tracing::warn;
-
-const INDEX_SYNC_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemotePluginIndex {
@@ -41,6 +38,14 @@ struct RemoteIndexConfig {
 pub struct RemoteIndexManager {
     config_file: PathBuf,
     cache_root: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncSummary {
+    pub repo: String,
+    pub added_plugins: Vec<String>,
+    pub updated_plugins: Vec<String>,
+    pub removed_plugins: Vec<String>,
 }
 
 impl RemoteIndexManager {
@@ -136,45 +141,16 @@ impl RemoteIndexManager {
         Ok(dirs)
     }
 
-    pub async fn sync_all_indexes(
+    pub async fn sync_all_indexes_with_summary(
         &self,
         client: &GithubClient,
-    ) -> Result<Vec<RemotePluginIndex>> {
-        let mut config = self.load_config()?;
-        let client = client.clone();
-        let results = stream::iter(
-            config
-                .indexes
-                .iter()
-                .filter(|index| index.enabled)
-                .cloned()
-                .map(|mut index| {
-                    let client = client.clone();
-                    async move {
-                        self.sync_index(&client, &mut index).await?;
-                        Ok::<RemotePluginIndex, anyhow::Error>(index)
-                    }
-                }),
-        )
-        .buffer_unordered(INDEX_SYNC_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
-
-        let mut synced = Vec::new();
-        for result in results {
-            let synced_index = result?;
-            if let Some(index) = config
-                .indexes
-                .iter_mut()
-                .find(|index| index.repo == synced_index.repo)
-            {
-                *index = synced_index.clone();
-            }
-            synced.push(synced_index);
+    ) -> Result<Vec<SyncSummary>> {
+        let indexes = self.list()?;
+        let mut summaries = Vec::new();
+        for index in indexes.into_iter().filter(|index| index.enabled) {
+            summaries.push(self.sync_one_with_summary(&index.repo, client).await?);
         }
-
-        self.save_config(&config)?;
-        Ok(synced)
+        Ok(summaries)
     }
 
     pub async fn sync_one(
@@ -193,6 +169,26 @@ impl RemoteIndexManager {
         let result = index.clone();
         self.save_config(&config)?;
         Ok(result)
+    }
+
+    pub async fn sync_one_with_summary(
+        &self,
+        repo: &str,
+        client: &GithubClient,
+    ) -> Result<SyncSummary> {
+        let repo = normalize_repo(repo)?;
+        let before = self.plugin_name_map_for_repo(&repo)?;
+        let mut config = self.load_config()?;
+        let index = config
+            .indexes
+            .iter_mut()
+            .find(|index| index.repo == repo)
+            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured"))?;
+        self.sync_index(client, index).await?;
+        let summary =
+            summarize_plugin_changes(&repo, before, self.plugin_name_map(index)?);
+        self.save_config(&config)?;
+        Ok(summary)
     }
 
     pub fn enable(&self, repo: &str) -> Result<RemotePluginIndex> {
@@ -303,6 +299,23 @@ impl RemoteIndexManager {
         Ok(self.cache_root.join(repo.replace('/', "__")))
     }
 
+    pub fn duplicate_plugin_names(&self) -> Result<Vec<(String, Vec<String>)>> {
+        let config = self.load_config()?;
+        let mut providers = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for index in config.indexes.into_iter().filter(|index| index.enabled) {
+            for plugin in self.plugin_name_map(&index)?.into_keys() {
+                providers
+                    .entry(plugin)
+                    .or_default()
+                    .push(index.repo.clone());
+            }
+        }
+        Ok(providers
+            .into_iter()
+            .filter_map(|(plugin, repos)| (repos.len() > 1).then_some((plugin, repos)))
+            .collect())
+    }
+
     fn load_config(&self) -> Result<RemoteIndexConfig> {
         if !self.config_file.exists() {
             return Ok(RemoteIndexConfig::default());
@@ -392,6 +405,36 @@ impl RemoteIndexManager {
 
     fn cache_dir(&self, index: &RemotePluginIndex) -> PathBuf {
         self.cache_root.join(index.repo.replace('/', "__"))
+    }
+
+    fn plugin_name_map_for_repo(
+        &self,
+        repo: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        let repo = normalize_repo(repo)?;
+        let index = self
+            .load_config()?
+            .indexes
+            .into_iter()
+            .find(|index| index.repo == repo)
+            .ok_or_else(|| anyhow!("Remote plugin index '{repo}' is not configured"))?;
+        self.plugin_name_map(&index)
+    }
+
+    fn plugin_name_map(
+        &self,
+        index: &RemotePluginIndex,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        let cache_dir = self.cache_dir(index);
+        let mut names = std::collections::BTreeMap::new();
+        if !cache_dir.exists() {
+            return Ok(names);
+        }
+        for plugin in crate::plugin::load_plugins_from_dir(&cache_dir.to_string_lossy())?
+        {
+            names.insert(plugin.name.clone(), plugin.location);
+        }
+        Ok(names)
     }
 
     fn should_sync(
@@ -490,6 +533,36 @@ fn normalize_plugin_name(plugin: &str) -> Result<String> {
         return Err(anyhow!("Plugin name cannot be empty"));
     }
     Ok(plugin.to_string())
+}
+
+fn summarize_plugin_changes(
+    repo: &str,
+    before: std::collections::BTreeMap<String, String>,
+    after: std::collections::BTreeMap<String, String>,
+) -> SyncSummary {
+    let mut added_plugins = Vec::new();
+    let mut updated_plugins = Vec::new();
+    let mut removed_plugins = Vec::new();
+
+    for (name, location) in &after {
+        match before.get(name) {
+            None => added_plugins.push(name.clone()),
+            Some(previous) if previous != location => updated_plugins.push(name.clone()),
+            _ => {}
+        }
+    }
+    for name in before.keys() {
+        if !after.contains_key(name) {
+            removed_plugins.push(name.clone());
+        }
+    }
+
+    SyncSummary {
+        repo: repo.to_string(),
+        added_plugins,
+        updated_plugins,
+        removed_plugins,
+    }
 }
 
 #[cfg(test)]

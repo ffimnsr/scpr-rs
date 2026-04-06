@@ -11,6 +11,7 @@ use std::{
     io::ErrorKind,
     ops::Drop,
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::NamedTempFile;
@@ -18,7 +19,6 @@ use tracing::{debug, info, warn};
 
 const LOCK_RETRY_DELAY_MS: u64 = 100;
 const LOCK_RETRY_ATTEMPTS: usize = 100;
-const LOCK_STALE_AFTER_SECS: u64 = 60;
 const STATE_VERSION: u32 = 1;
 
 /// Record of a single installed package, persisted in `~/.local/share/scpr/state.toml`.
@@ -128,6 +128,7 @@ pub struct Installer {
     local_man: PathBuf,
     /// `~/.local/share/scpr/state.toml`
     state_file: PathBuf,
+    lock_stale_after_secs: u64,
 }
 
 impl Installer {
@@ -154,6 +155,7 @@ impl Installer {
             local_bin,
             local_man,
             state_file,
+            lock_stale_after_secs: settings.lock_stale_after_secs(),
         })
     }
 
@@ -293,8 +295,12 @@ impl Installer {
                     .collect::<Vec<_>>()
                     .join(", ");
                 anyhow!(
-                    "Asset '{asset_name}' not found in release {tag} of {owner}/{repo}.\n\
-                     Available assets: {available}"
+                    "Asset pattern '{}' resolved to '{}' but no matching asset was found in release {tag} of {owner}/{repo}.\n\
+                     Binary path template: '{}'\n\
+                     Available assets: {available}",
+                    plugin.asset_pattern,
+                    asset_name,
+                    plugin.binary,
                 )
             })?;
 
@@ -305,6 +311,16 @@ impl Installer {
         let checksum_sha256 = self
             .resolve_expected_sha256(plugin, client, &release.assets, asset, tag, &target)
             .await?;
+        installer_archive::verify_signature_if_configured(
+            plugin,
+            client,
+            &release.assets,
+            asset,
+            &data,
+            tag,
+            &target,
+        )
+        .await?;
         self.verify_sha256(&data, &checksum_sha256)?;
 
         let payload = installer_archive::extract_install_payload(
@@ -386,6 +402,7 @@ impl Installer {
                 .join(&installed_paths.binary_filename)
                 .display()
         );
+        self.run_post_install_hooks(plugin, &installed_paths.binary_filename, dry_run)?;
 
         Ok(())
     }
@@ -505,7 +522,7 @@ impl Installer {
             .duration_since(modified)
             .unwrap_or_default()
             .as_secs();
-        if age < LOCK_STALE_AFTER_SECS {
+        if age < self.lock_stale_after_secs {
             return Ok(false);
         }
         match fs::remove_file(lock_path) {
@@ -538,6 +555,46 @@ impl Installer {
 
     fn commit_install(&self, payload: InstallPayload) -> Result<InstalledPaths> {
         installer_archive::commit_install(&self.local_bin, &self.local_man, payload)
+    }
+
+    fn run_post_install_hooks(
+        &self,
+        plugin: &Plugin,
+        binary_filename: &str,
+        dry_run: bool,
+    ) -> Result<()> {
+        let Some(hooks) = plugin.post_install.as_deref() else {
+            return Ok(());
+        };
+        let binary_path = self.local_bin.join(binary_filename);
+        for hook in hooks {
+            let command = hook
+                .replace("{binary_path}", &binary_path.display().to_string())
+                .replace("{binary_name}", binary_filename)
+                .replace("{plugin}", &plugin.name);
+            if dry_run {
+                println!("[dry-run] Would run post-install hook: {command}");
+                continue;
+            }
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(&command)
+                .status()
+                .with_context(|| {
+                    format!(
+                        "Failed to execute post-install hook for '{}': {}",
+                        plugin.name, command
+                    )
+                })?;
+            if !status.success() {
+                anyhow::bail!(
+                    "Post-install hook failed for '{}': {}",
+                    plugin.name,
+                    command
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Mark an installed package as pinned so `update --all` will skip it.
@@ -684,6 +741,36 @@ impl Installer {
         Ok(removed)
     }
 
+    pub fn rollback_version(&self, package: &str) -> Result<String> {
+        let state = self.load_state()?;
+        let current = state
+            .installed
+            .iter()
+            .find(|installed| installed.name == package)
+            .ok_or_else(|| anyhow!("'{package}' is not installed"))?;
+
+        state
+            .history
+            .iter()
+            .rev()
+            .find_map(|event| {
+                if event.package == package
+                    && matches!(event.action, HistoryAction::Updated)
+                    && event.to_version.as_deref() == Some(current.version.as_str())
+                {
+                    event.from_version.clone()
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "No previous version is recorded for '{}'; rollback is only available after an update",
+                    package
+                )
+            })
+    }
+
     pub fn export_state(&self, format: StateFormat) -> Result<String> {
         let state = self.load_state()?;
         match format {
@@ -703,6 +790,7 @@ impl Installer {
                 toml::from_str(contents).context("Failed to parse TOML state backup")?
             }
         };
+        self.back_up_state_file()?;
         self.save_state(&state)
     }
 
@@ -712,6 +800,21 @@ impl Installer {
             .build()
             .context("Failed to initialize runtime for installer lock")?;
         runtime.block_on(self.acquire_state_lock())
+    }
+
+    fn back_up_state_file(&self) -> Result<()> {
+        if !self.state_file.exists() {
+            return Ok(());
+        }
+        let backup_path = self.state_file.with_extension("toml.bak");
+        fs::copy(&self.state_file, &backup_path).with_context(|| {
+            format!(
+                "Failed to back up state file from {} to {}",
+                self.state_file.display(),
+                backup_path.display()
+            )
+        })?;
+        Ok(())
     }
 }
 

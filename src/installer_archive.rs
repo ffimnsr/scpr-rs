@@ -123,6 +123,50 @@ pub(crate) async fn resolve_expected_sha256(
     parse_sha256_checksum_file(&checksum_text, &asset.name)
 }
 
+pub(crate) async fn verify_signature_if_configured(
+    plugin: &Plugin,
+    client: &GithubClient,
+    assets: &[ReleaseAsset],
+    asset: &ReleaseAsset,
+    data: &[u8],
+    tag: &str,
+    target: &str,
+) -> Result<()> {
+    let Some(signature_pattern) = plugin.signature_asset_pattern.as_deref() else {
+        return Ok(());
+    };
+    let signature_format = plugin.signature_format_name().ok_or_else(|| {
+        anyhow!(
+            "Plugin '{}' configures a signature asset but no signature format",
+            plugin.name
+        )
+    })?;
+
+    let signature_name = plugin.expand_template(signature_pattern, tag, target);
+    let signature_asset = assets
+        .iter()
+        .find(|candidate| candidate.name == signature_name)
+        .ok_or_else(|| {
+            anyhow!(
+                "Signature asset '{signature_name}' not found for plugin '{}'",
+                plugin.name
+            )
+        })?;
+
+    info!("Downloading signature {}…", signature_asset.name);
+    let signature_data = client
+        .download_asset(&signature_asset.browser_download_url, signature_asset.size)
+        .await?;
+    verify_signature(
+        signature_format,
+        plugin.signature_key.as_deref(),
+        &asset.name,
+        data,
+        &signature_asset.name,
+        &signature_data,
+    )
+}
+
 pub(crate) fn verify_sha256(data: &[u8], expected_sha256: &str) -> Result<()> {
     let actual = sha256_hex(data);
     if actual != expected_sha256 {
@@ -146,6 +190,7 @@ pub(crate) fn commit_install(
 
     let mut staged = Vec::new();
     let binary_dest = local_bin.join(&payload.binary_filename);
+    cleanup_orphaned_backups(std::slice::from_ref(&binary_dest));
     staged.push(stage_file(
         local_bin,
         &binary_dest,
@@ -155,8 +200,14 @@ pub(crate) fn commit_install(
 
     let mut man_page_filenames = Vec::new();
     for (filename, contents) in payload.man_pages {
-        let dest = local_man.join(&filename);
-        staged.push(stage_file(local_man, &dest, &contents, false)?);
+        let dest = man_destination(local_man, &filename);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        cleanup_orphaned_backups(std::slice::from_ref(&dest));
+        let staging_dir = dest.parent().unwrap_or(local_man);
+        staged.push(stage_file(staging_dir, &dest, &contents, false)?);
         man_page_filenames.push(filename);
     }
 
@@ -187,6 +238,12 @@ pub(crate) fn commit_install(
             Err(err) => {
                 restore_backups(&backups)?;
                 cleanup_paths(&committed_paths);
+                cleanup_orphaned_backups(
+                    &backups
+                        .iter()
+                        .map(|(dest, _)| dest.clone())
+                        .collect::<Vec<_>>(),
+                );
                 return Err(anyhow!(
                     "Failed to replace {}: {}",
                     staged_file.dest.display(),
@@ -197,6 +254,11 @@ pub(crate) fn commit_install(
     }
 
     cleanup_backup_files(backups);
+    cleanup_orphaned_backups(
+        &std::iter::once(binary_dest)
+            .chain(man_page_filenames.iter().map(|name| local_man.join(name)))
+            .collect::<Vec<_>>(),
+    );
 
     Ok(InstalledPaths {
         binary_filename: payload.binary_filename,
@@ -224,6 +286,10 @@ pub(crate) fn parse_sha256_checksum_file(
             continue;
         }
 
+        if let Some(digest) = parse_bsd_checksum_line(line, asset_name)? {
+            return Ok(digest);
+        }
+
         if !line.contains(char::is_whitespace) {
             return parse_sha256_digest(line);
         }
@@ -239,6 +305,108 @@ pub(crate) fn parse_sha256_checksum_file(
     Err(anyhow!(
         "Checksum file does not contain an entry for asset '{asset_name}'"
     ))
+}
+
+fn parse_bsd_checksum_line(line: &str, asset_name: &str) -> Result<Option<String>> {
+    let Some((left, right)) = line.split_once('=') else {
+        return Ok(None);
+    };
+    let left = left.trim();
+    let right = right.trim();
+    let Some(inner) = left
+        .strip_prefix("SHA256 (")
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Ok(None);
+    };
+    if inner == asset_name {
+        return parse_sha256_digest(right).map(Some);
+    }
+    Ok(None)
+}
+
+fn verify_signature(
+    signature_format: &str,
+    signature_key: Option<&str>,
+    asset_name: &str,
+    asset_data: &[u8],
+    signature_name: &str,
+    signature_data: &[u8],
+) -> Result<()> {
+    let temp_dir = tempfile::tempdir()
+        .context("Failed to create temp dir for signature verification")?;
+    let asset_path = temp_dir.path().join(asset_name);
+    let signature_path = temp_dir.path().join(signature_name);
+    fs::write(&asset_path, asset_data).with_context(|| {
+        format!(
+            "Failed to stage asset for signature verification at {}",
+            asset_path.display()
+        )
+    })?;
+    fs::write(&signature_path, signature_data).with_context(|| {
+        format!(
+            "Failed to stage signature for verification at {}",
+            signature_path.display()
+        )
+    })?;
+
+    match signature_format {
+        "gpg" => verify_gpg_signature(&asset_path, &signature_path),
+        "minisign" => {
+            verify_minisign_signature(signature_key, &asset_path, &signature_path)
+        }
+        other => Err(anyhow!(
+            "Unsupported signature format '{other}'. Use 'gpg' or 'minisign'."
+        )),
+    }
+}
+
+fn verify_gpg_signature(asset_path: &Path, signature_path: &Path) -> Result<()> {
+    let output = process::Command::new("gpg")
+        .arg("--verify")
+        .arg(signature_path)
+        .arg(asset_path)
+        .output()
+        .context("Failed to execute gpg for signature verification")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "GPG signature verification failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    info!("Verified GPG signature");
+    Ok(())
+}
+
+fn verify_minisign_signature(
+    signature_key: Option<&str>,
+    asset_path: &Path,
+    signature_path: &Path,
+) -> Result<()> {
+    let public_key = signature_key.ok_or_else(|| {
+        anyhow!(
+            "minisign verification requires plugin.signature_key to contain the trusted public key"
+        )
+    })?;
+    let output = process::Command::new("minisign")
+        .arg("-V")
+        .arg("-q")
+        .arg("-P")
+        .arg(public_key)
+        .arg("-m")
+        .arg(asset_path)
+        .arg("-x")
+        .arg(signature_path)
+        .output()
+        .context("Failed to execute minisign for signature verification")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "minisign verification failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    info!("Verified minisign signature");
+    Ok(())
 }
 
 fn extract_from_targz(
@@ -317,14 +485,11 @@ fn extract_from_tar<R: io::Read>(
             binary_filename = Some(filename);
             binary_contents = Some(bytes);
         } else if man_pages_left.contains(path_str.as_str()) {
-            let man_filename = Path::new(&path_str)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| anyhow!("Invalid man page path: {path_str}"))?;
+            let man_filename = man_install_relpath(&path_str)?;
             let mut bytes = Vec::new();
             io::Read::read_to_end(&mut entry, &mut bytes)
                 .context("Failed to read man page from archive")?;
-            extracted_man_pages.push((man_filename.to_string(), bytes));
+            extracted_man_pages.push((man_filename, bytes));
             man_pages_left.remove(path_str.as_str());
         }
 
@@ -379,14 +544,11 @@ fn extract_from_zip(
     for man_path in man_paths {
         match archive.by_name(man_path) {
             Ok(mut entry) => {
-                let man_filename = Path::new(man_path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .ok_or_else(|| anyhow!("Invalid man page path: {man_path}"))?;
+                let man_filename = man_install_relpath(man_path)?;
                 let mut bytes = Vec::new();
                 io::Read::read_to_end(&mut entry, &mut bytes)
                     .context("Failed to read man page from zip archive")?;
-                extracted_man_pages.push((man_filename.to_string(), bytes));
+                extracted_man_pages.push((man_filename, bytes));
             }
             Err(_) => warn!("Man page '{man_path}' not found in archive, skipping"),
         }
@@ -518,5 +680,66 @@ fn restore_backups(backups: &[(PathBuf, PathBuf)]) -> Result<()> {
 fn cleanup_paths(paths: &[PathBuf]) {
     for path in paths {
         let _ = fs::remove_file(path);
+    }
+}
+
+fn man_install_relpath(path: &str) -> Result<String> {
+    let path = Path::new(path);
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("Invalid man page path: {}", path.display()))?;
+    for ancestor in path.ancestors() {
+        let Some(component) = ancestor.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if component.len() >= 4
+            && component.starts_with("man")
+            && component[3..].chars().all(|ch| ch.is_ascii_digit())
+        {
+            return Ok(format!("{component}/{filename}"));
+        }
+    }
+    Ok(filename.to_string())
+}
+
+fn man_destination(local_man: &Path, relative: &str) -> PathBuf {
+    if relative.contains('/')
+        && local_man
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with("man") && name[3..].chars().all(|ch| ch.is_ascii_digit())
+            })
+        && let Some(parent) = local_man.parent()
+    {
+        return parent.join(relative);
+    }
+    local_man.join(relative)
+}
+
+fn cleanup_orphaned_backups(paths: &[PathBuf]) {
+    for path in paths {
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let prefix = format!("{filename}.scpr-old.");
+        let Ok(entries) = fs::read_dir(parent) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            let matches = entry_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with(&prefix))
+                .unwrap_or(false);
+            if matches {
+                let _ = fs::remove_file(entry_path);
+            }
+        }
     }
 }

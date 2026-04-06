@@ -12,6 +12,11 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
         .action(ArgAction::SetTrue)
         .help("Show what would happen without making any changes");
 
+    let list_versions_arg = Arg::new("list-versions")
+        .long("list-versions")
+        .action(ArgAction::SetTrue)
+        .help("List available release tags instead of installing");
+
     let json_arg = Arg::new("json")
         .long("json")
         .action(ArgAction::SetTrue)
@@ -32,6 +37,14 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
         .action(ArgAction::Count)
         .help("Increase output verbosity (-v for debug, -vv for trace)");
 
+    let log_format_arg = Arg::new("log-format")
+        .long("log-format")
+        .global(true)
+        .action(ArgAction::Set)
+        .default_value("pretty")
+        .value_parser(["pretty", "json"])
+        .help("Format tracing logs as pretty text or JSON");
+
     let refresh_arg = Arg::new("refresh")
         .long("refresh")
         .global(true)
@@ -51,16 +64,18 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
         .propagate_version(true)
         .arg(quiet_arg)
         .arg(verbose_arg)
+        .arg(log_format_arg)
         .arg(refresh_arg)
         .subcommand(
             Command::new("install")
                 .about("Install one or more packages")
                 .arg(
                     Arg::new("packages")
-                        .required(true)
+                        .required_unless_present("list-versions")
                         .num_args(1..)
                         .help("Plugin name or alias, optionally as <name>@<tag>"),
                 )
+                .arg(list_versions_arg.clone())
                 .arg(
                     Arg::new("tag")
                         .long("tag")
@@ -107,6 +122,17 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                 .arg(plugins_dir_arg.clone()),
         )
         .subcommand(
+            Command::new("versions")
+                .about("List available release tags for a package")
+                .arg(
+                    Arg::new("package")
+                        .required(true)
+                        .help("Plugin name or alias"),
+                )
+                .arg(json_arg.clone())
+                .arg(plugins_dir_arg.clone()),
+        )
+        .subcommand(
             Command::new("plugins")
                 .about("Inspect available plugins")
                 .subcommand(
@@ -123,6 +149,12 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                                 .help("Case-insensitive plugin name, alias, or description filter")
                                 .required(false),
                         )
+                        .arg(
+                            Arg::new("remote")
+                                .long("remote")
+                                .action(ArgAction::SetTrue)
+                                .help("Trigger a lazy sync of configured remote indexes before searching"),
+                        )
                         .arg(json_arg.clone())
                         .arg(plugins_dir_arg.clone()),
                 )
@@ -135,6 +167,31 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                                 .help("Plugin name or alias"),
                         )
                         .arg(plugins_dir_arg.clone()),
+                )
+                .subcommand(
+                    Command::new("validate")
+                        .about("Validate a local plugin TOML file")
+                        .arg(
+                            Arg::new("path")
+                                .required(true)
+                                .help("Path to a plugin TOML file"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("test")
+                        .about("Dry-run install using a local plugin TOML file")
+                        .arg(
+                            Arg::new("path")
+                                .required(true)
+                                .help("Path to a plugin TOML file"),
+                        )
+                        .arg(
+                            Arg::new("tag")
+                                .long("tag")
+                                .action(ArgAction::Set)
+                                .help("Install a specific release tag"),
+                        )
+                        .arg(target_arg.clone()),
                 )
                 .subcommand(
                     Command::new("new")
@@ -324,6 +381,12 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                         .help("Show only the most recent N history events"),
                 )
                 .arg(
+                    Arg::new("since")
+                        .long("since")
+                        .action(ArgAction::Set)
+                        .help("Show only history events on or after YYYY-MM-DD"),
+                )
+                .arg(
                     Arg::new("graph")
                         .long("graph")
                         .action(ArgAction::SetTrue)
@@ -390,6 +453,36 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                         .required(true)
                         .help("Installed package name"),
                 ),
+        )
+        .subcommand(
+            Command::new("hold")
+                .about("Alias for pin")
+                .arg(
+                    Arg::new("package")
+                        .required(true)
+                        .help("Installed package name"),
+                ),
+        )
+        .subcommand(
+            Command::new("release")
+                .about("Alias for unpin")
+                .arg(
+                    Arg::new("package")
+                        .required(true)
+                        .help("Installed package name"),
+                ),
+        )
+        .subcommand(
+            Command::new("rollback")
+                .about("Reinstall the previous recorded version of a package")
+                .arg(
+                    Arg::new("package")
+                        .required(true)
+                        .help("Installed package name or alias"),
+                )
+                .arg(target_arg.clone())
+                .arg(dry_run_arg.clone())
+                .arg(plugins_dir_arg.clone()),
         )
         .subcommand(
             Command::new("completions")

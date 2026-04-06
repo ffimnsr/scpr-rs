@@ -15,17 +15,25 @@ mod remote_index;
 mod settings;
 
 use cli_support::{
-    build_doctor_checks, build_installed_status_rows, collect_outdated_packages,
-    matches_query, parse_package_request, parse_repo_arg, parse_state_format,
+    build_doctor_checks, build_installed_package_rows, build_installed_status_rows,
+    collect_outdated_packages, list_plugin_versions, matches_query,
+    parse_package_request, parse_repo_arg, parse_since_date, parse_state_format,
     print_audit_records, print_available_plugins, print_doctor_checks, print_history,
     print_installed_packages, print_installed_status_rows, print_outdated_packages,
-    print_plugin_index_pins, print_plugin_info, print_remote_indexes,
-    resolved_plugin_dirs, resolved_plugin_dirs_for_query,
+    print_plugin_index_pins, print_plugin_info, print_plugin_validation,
+    print_remote_indexes, print_versions, resolved_plugin_dirs,
+    resolved_plugin_dirs_for_query, validate_plugin_file,
 };
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PKG_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 const UPDATE_ALL_CONCURRENCY: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogFormat {
+    Pretty,
+    Json,
+}
 
 #[tokio::main]
 async fn main() {
@@ -53,10 +61,15 @@ async fn run() -> Result<()> {
             }
         }
     });
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .without_time()
-        .init();
+    init_logging(
+        filter,
+        parse_log_format(
+            matches
+                .get_one::<String>("log-format")
+                .map(String::as_str)
+                .unwrap_or("pretty"),
+        )?,
+    );
 
     let settings = settings::AppSettings::load()?;
     let force_refresh = matches.get_flag("refresh");
@@ -66,6 +79,35 @@ async fn run() -> Result<()> {
 
     match matches.subcommand() {
         Some(("install", sub)) => {
+            if sub.get_flag("list-versions") {
+                let package_values: Vec<&String> = sub
+                    .get_many::<String>("packages")
+                    .map(|values| values.collect())
+                    .unwrap_or_default();
+                if package_values.len() > 1 {
+                    anyhow::bail!(
+                        "`install --list-versions` only supports a single package"
+                    );
+                }
+                let package = package_values.first().copied().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Missing package name. Use `install --list-versions <package>`"
+                    )
+                })?;
+                let dirs = resolved_plugin_dirs_for_query(
+                    &settings,
+                    &client,
+                    sub.get_one::<String>("plugins-dir"),
+                    package,
+                    force_refresh,
+                )
+                .await?;
+                let plugin = find_plugin_with_suggestion(package, &dirs)?;
+                let versions = list_plugin_versions(&client, &plugin).await?;
+                print_versions(&versions, false);
+                return Ok(());
+            }
+
             let package_values: Vec<&String> =
                 sub.get_many::<String>("packages").unwrap().collect();
             if package_values.len() > 1 && sub.get_one::<String>("tag").is_some() {
@@ -89,7 +131,7 @@ async fn run() -> Result<()> {
                     force_refresh,
                 )
                 .await?;
-                let plugin = plugin::find_plugin(&request.name, &dirs)?;
+                let plugin = find_plugin_with_suggestion(&request.name, &dirs)?;
                 installer
                     .install(
                         &plugin,
@@ -100,6 +142,20 @@ async fn run() -> Result<()> {
                     )
                     .await?;
             }
+        }
+        Some(("versions", sub)) => {
+            let package = sub.get_one::<String>("package").unwrap();
+            let dirs = resolved_plugin_dirs_for_query(
+                &settings,
+                &client,
+                sub.get_one::<String>("plugins-dir"),
+                package,
+                force_refresh,
+            )
+            .await?;
+            let plugin = find_plugin_with_suggestion(package, &dirs)?;
+            let versions = list_plugin_versions(&client, &plugin).await?;
+            print_versions(&versions, sub.get_flag("json"));
         }
         Some(("update", sub)) => {
             let dirs = resolved_plugin_dirs(
@@ -125,9 +181,23 @@ async fn run() -> Result<()> {
                         "Use either `update <package> [--tag <tag>] [--target <triple>]` or `update --all`, not both"
                     );
                 }
-                let outdated =
-                    collect_outdated_packages(&installer, &client, &dirs, None, true)
-                        .await?;
+                let report = cli_support::collect_outdated_packages_report(
+                    &installer, &client, &dirs, None, true,
+                )
+                .await?;
+                if !report.failures.is_empty() {
+                    let details = report
+                        .failures
+                        .iter()
+                        .map(|(name, err)| format!("{name}: {err}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    anyhow::bail!(
+                        "Failed to check updates for one or more packages:\n{}",
+                        details
+                    );
+                }
+                let outdated = report.outdated;
                 if outdated.is_empty() {
                     println!("All installed packages are up to date.");
                 } else {
@@ -249,7 +319,7 @@ async fn run() -> Result<()> {
                     force_refresh,
                 )
                 .await?;
-                let plugin = plugin::find_plugin(&request.name, &dirs)?;
+                let plugin = find_plugin_with_suggestion(&request.name, &dirs)?;
                 installer
                     .install(
                         &plugin,
@@ -272,7 +342,7 @@ async fn run() -> Result<()> {
                 force_refresh,
             )
             .await?;
-            let plugin = plugin::find_plugin(package, &dirs)?;
+            let plugin = find_plugin_with_suggestion(package, &dirs)?;
             installer.uninstall(&plugin, dry_run).await?;
         }
         Some(("plugins", sub)) => match sub.subcommand() {
@@ -286,6 +356,8 @@ async fn run() -> Result<()> {
                 )
                 .await?;
                 let plugins = plugin::load_plugins_from_dirs(&dirs)?;
+                let manager = remote_index::RemoteIndexManager::new()?;
+                warn_duplicate_remote_plugins(&manager)?;
                 print_available_plugins(&plugins, json);
             }
             Some(("search", sub)) => {
@@ -294,13 +366,15 @@ async fn run() -> Result<()> {
                     &settings,
                     &client,
                     sub.get_one::<String>("plugins-dir"),
-                    force_refresh,
+                    force_refresh || sub.get_flag("remote"),
                 )
                 .await?;
                 let query = sub
                     .get_one::<String>("query")
                     .map(|value| value.to_ascii_lowercase());
                 let plugins = plugin::load_plugins_from_dirs(&dirs)?;
+                let manager = remote_index::RemoteIndexManager::new()?;
+                warn_duplicate_remote_plugins(&manager)?;
                 let filtered: Vec<_> = plugins
                     .into_iter()
                     .filter(|plugin| matches_query(plugin, query.as_deref()))
@@ -317,8 +391,28 @@ async fn run() -> Result<()> {
                     force_refresh,
                 )
                 .await?;
-                let plugin = plugin::find_plugin(package, &dirs)?;
+                let plugin = find_plugin_with_suggestion(package, &dirs)?;
                 print_plugin_info(&plugin);
+            }
+            Some(("validate", sub)) => {
+                let path = sub.get_one::<String>("path").unwrap();
+                let report = validate_plugin_file(path)?;
+                print_plugin_validation(&report);
+            }
+            Some(("test", sub)) => {
+                let path = sub.get_one::<String>("path").unwrap();
+                let report = validate_plugin_file(path)?;
+                print_plugin_validation(&report);
+                let plugin = plugin::parse(path)?;
+                installer
+                    .install(
+                        &plugin,
+                        &client,
+                        sub.get_one::<String>("tag").map(String::as_str),
+                        sub.get_one::<String>("target").map(String::as_str),
+                        true,
+                    )
+                    .await?;
             }
             Some(("new", sub)) => {
                 let repo = sub.get_one::<String>("repo").unwrap();
@@ -418,11 +512,17 @@ async fn run() -> Result<()> {
                                 "Use either `plugins index sync <repo>` or `plugins index sync --all`, not both"
                             );
                         }
-                        let indexes = manager.sync_all_indexes(&client).await?;
-                        if indexes.is_empty() {
+                        let summaries =
+                            manager.sync_all_indexes_with_summary(&client).await?;
+                        if summaries.is_empty() {
                             println!("No enabled remote plugin indexes to sync.");
                         } else {
-                            println!("Synced {} remote plugin index(es).", indexes.len());
+                            println!(
+                                "Synced {} remote plugin index(es).",
+                                summaries.len()
+                            );
+                            print_remote_sync_summaries(&summaries);
+                            warn_duplicate_remote_plugins(&manager)?;
                         }
                     } else {
                         let repo = sub.get_one::<String>("repo").ok_or_else(|| {
@@ -430,11 +530,10 @@ async fn run() -> Result<()> {
                                 "Missing repo. Use `plugins index sync <owner>/<repo>` or `plugins index sync --all`"
                             )
                         })?;
-                        let index = manager.sync_one(repo, &client).await?;
-                        println!(
-                            "Synced remote plugin index '{}' on branch '{}'.",
-                            index.repo, index.branch
-                        );
+                        let summary =
+                            manager.sync_one_with_summary(repo, &client).await?;
+                        print_remote_sync_summaries(&[summary]);
+                        warn_duplicate_remote_plugins(&manager)?;
                     }
                 }
                 Some(("promote", sub)) => {
@@ -517,7 +616,7 @@ async fn run() -> Result<()> {
                         force_refresh,
                     )
                     .await?;
-                    let name = plugin::find_plugin(package, &package_dirs)?.name;
+                    let name = find_plugin_with_suggestion(package, &package_dirs)?.name;
                     if !installer
                         .list_installed()?
                         .iter()
@@ -541,7 +640,8 @@ async fn run() -> Result<()> {
         }
         Some(("doctor", _)) => {
             let checks =
-                build_doctor_checks(&installer, &settings.default_plugin_dirs())?;
+                build_doctor_checks(&installer, &client, &settings.default_plugin_dirs())
+                    .await?;
             print_doctor_checks(&checks);
         }
         Some(("list", sub)) | Some(("status", sub)) => {
@@ -558,10 +658,11 @@ async fn run() -> Result<()> {
                 let outdated =
                     collect_outdated_packages(&installer, &client, &dirs, None, false)
                         .await?;
-                let rows = build_installed_status_rows(installed, &outdated);
+                let rows = build_installed_status_rows(&installer, installed, &outdated);
                 print_installed_status_rows(&rows, json);
             } else {
-                print_installed_packages(&installed, json);
+                let rows = build_installed_package_rows(&installer, installed);
+                print_installed_packages(&rows, json);
             }
         }
         Some(("verify", _)) => {
@@ -588,7 +689,21 @@ async fn run() -> Result<()> {
                 let graph = sub.get_flag("graph");
                 let package = sub.get_one::<String>("package").map(String::as_str);
                 let limit = sub.get_one::<usize>("limit").copied();
-                let events = installer.history_limited(package, limit)?;
+                let since =
+                    parse_since_date(sub.get_one::<String>("since").map(String::as_str))?;
+                let mut events = if since.is_some() {
+                    installer.history(package)?
+                } else {
+                    installer.history_limited(package, limit)?
+                };
+                if let Some(since) = since {
+                    events.retain(|event| event.timestamp_unix >= since);
+                    if let Some(limit) = limit
+                        && events.len() > limit
+                    {
+                        events = events.split_off(events.len() - limit);
+                    }
+                }
                 print_history(&events, graph, json);
             }
         },
@@ -631,6 +746,36 @@ async fn run() -> Result<()> {
             let package = sub.get_one::<String>("package").unwrap();
             installer.unpin(package)?;
         }
+        Some(("hold", sub)) => {
+            let package = sub.get_one::<String>("package").unwrap();
+            installer.pin(package)?;
+        }
+        Some(("release", sub)) => {
+            let package = sub.get_one::<String>("package").unwrap();
+            installer.unpin(package)?;
+        }
+        Some(("rollback", sub)) => {
+            let package = sub.get_one::<String>("package").unwrap();
+            let dirs = resolved_plugin_dirs_for_query(
+                &settings,
+                &client,
+                sub.get_one::<String>("plugins-dir"),
+                package,
+                force_refresh,
+            )
+            .await?;
+            let plugin = find_plugin_with_suggestion(package, &dirs)?;
+            let rollback_version = installer.rollback_version(&plugin.name)?;
+            installer
+                .install(
+                    &plugin,
+                    &client,
+                    Some(&rollback_version),
+                    sub.get_one::<String>("target").map(String::as_str),
+                    sub.get_flag("dry-run"),
+                )
+                .await?;
+        }
         Some(("completions", sub)) => {
             use clap_complete::{Shell, generate};
             let shell_str = sub.get_one::<String>("shell").unwrap();
@@ -644,4 +789,94 @@ async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn find_plugin_with_suggestion(name: &str, dirs: &[String]) -> Result<plugin::Plugin> {
+    match plugin::find_plugin(name, dirs) {
+        Ok(plugin) => Ok(plugin),
+        Err(err) => {
+            if parse_repo_arg(name).is_ok() {
+                anyhow::bail!(
+                    "{}\nTry generating a plugin first:\n  scpr plugins new {}",
+                    err,
+                    name
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
+fn print_remote_sync_summaries(summaries: &[remote_index::SyncSummary]) {
+    for summary in summaries {
+        println!(
+            "Synced remote plugin index '{}': {} added, {} updated, {} removed.",
+            summary.repo,
+            summary.added_plugins.len(),
+            summary.updated_plugins.len(),
+            summary.removed_plugins.len()
+        );
+        if !summary.added_plugins.is_empty() {
+            println!("  Added: {}", summary.added_plugins.join(", "));
+        }
+        if !summary.updated_plugins.is_empty() {
+            println!("  Updated: {}", summary.updated_plugins.join(", "));
+        }
+        if !summary.removed_plugins.is_empty() {
+            println!("  Removed: {}", summary.removed_plugins.join(", "));
+        }
+    }
+}
+
+fn warn_duplicate_remote_plugins(
+    manager: &remote_index::RemoteIndexManager,
+) -> Result<()> {
+    for (plugin_name, repos) in manager.duplicate_plugin_names()? {
+        eprintln!(
+            "warning: plugin '{}' exists in multiple enabled remote indexes: {}. Resolution still prefers the earliest index.",
+            plugin_name,
+            repos.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn parse_log_format(value: &str) -> Result<LogFormat> {
+    match value {
+        "pretty" => Ok(LogFormat::Pretty),
+        "json" => Ok(LogFormat::Json),
+        other => Err(anyhow::anyhow!(
+            "Unsupported log format '{other}'. Use pretty or json."
+        )),
+    }
+}
+
+fn init_logging(filter: EnvFilter, format: LogFormat) {
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .without_time();
+    match format {
+        LogFormat::Pretty => builder.init(),
+        LogFormat::Json => builder.json().flatten_event(true).init(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogFormat, parse_log_format};
+
+    #[test]
+    fn test_parse_log_format_pretty() {
+        assert_eq!(parse_log_format("pretty").unwrap(), LogFormat::Pretty);
+    }
+
+    #[test]
+    fn test_parse_log_format_json() {
+        assert_eq!(parse_log_format("json").unwrap(), LogFormat::Json);
+    }
+
+    #[test]
+    fn test_parse_log_format_rejects_unknown_value() {
+        assert!(parse_log_format("yaml").is_err());
+    }
 }

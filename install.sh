@@ -80,9 +80,10 @@ main() {
 
 parse_args() {
     BIN_DIR_DEFAULT="${HOME}/.local/bin"
-    MAN_DIR_DEFAULT="${HOME}/.local/share/man"
-    DOC_DIR_DEFAULT="${HOME}/.local/share/doc"
-    LIC_DIR_DEFAULT="${HOME}/.local/share/licenses"
+    DATA_HOME_DEFAULT="${XDG_DATA_HOME:-${HOME}/.local/share}"
+    MAN_DIR_DEFAULT="${DATA_HOME_DEFAULT}/man"
+    DOC_DIR_DEFAULT="${DATA_HOME_DEFAULT}/doc"
+    LIC_DIR_DEFAULT="${DATA_HOME_DEFAULT}/licenses"
     SUDO_DEFAULT="sudo"
     BIN_DIR="${BIN_DIR_DEFAULT}"
     MAN_DIR="${MAN_DIR_DEFAULT}"
