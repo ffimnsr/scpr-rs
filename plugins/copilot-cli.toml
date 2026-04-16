@@ -1,0 +1,15 @@
+[plugin]
+name = "copilot-cli"
+alias = ["copilot", "copilot-cli"]
+description = "GitHub Copilot in the CLI"
+location = "github:github/copilot-cli"
+asset_pattern = "copilot-{target}.tar.gz"
+checksum_asset_pattern = "SHA256SUMS.txt"
+binary = "copilot"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "linux-x64"
+"linux-aarch64" = "linux-arm64"
+"macos-x86_64" = "darwin-x64"
+"macos-aarch64" = "darwin-arm64"
