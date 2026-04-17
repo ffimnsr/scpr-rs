@@ -35,6 +35,7 @@ fn sample_plugin() -> Plugin {
         checksum_asset_pattern: Some(
             "{name}-{version}-{target}.tar.gz.sha256".to_string(),
         ),
+        allow_insecure_no_checksum: false,
         signature_asset_pattern: None,
         signature_format: None,
         signature_key: None,
@@ -255,6 +256,40 @@ fn test_audit_detects_modified_binary() {
     let audit = installer.audit().unwrap();
     assert_eq!(audit.len(), 1);
     assert!(matches!(audit[0].status, AuditStatus::Modified));
+}
+
+#[test]
+fn test_audit_marks_packages_without_checksum_as_untracked() {
+    let installer = temp_installer();
+    let binary_path = installer.local_bin_dir().join("navi");
+    std::fs::write(&binary_path, b"binary").unwrap();
+    installer
+        .save_state(&State {
+            version: STATE_VERSION,
+            installed: vec![InstalledPackage {
+                name: "navi".to_string(),
+                version: "v2.24.0".to_string(),
+                binary: "navi".to_string(),
+                source: None,
+                target: None,
+                asset_name: None,
+                checksum_sha256: None,
+                man_pages: Vec::new(),
+                installed_at_unix: Some(1),
+                pinned: false,
+            }],
+            history: Vec::new(),
+        })
+        .unwrap();
+
+    let audit = installer.audit().unwrap();
+    assert_eq!(audit.len(), 1);
+    assert!(matches!(audit[0].status, AuditStatus::Untracked));
+    assert!(
+        audit[0]
+            .detail
+            .contains("No stored checksum; cannot verify local changes")
+    );
 }
 
 #[test]

@@ -321,7 +321,9 @@ impl Installer {
             &target,
         )
         .await?;
-        self.verify_sha256(&data, &checksum_sha256)?;
+        if let Some(expected_sha256) = checksum_sha256.as_deref() {
+            self.verify_sha256(&data, expected_sha256)?;
+        }
 
         let payload = installer_archive::extract_install_payload(
             &asset_name,
@@ -337,6 +339,12 @@ impl Installer {
                 payload.binary_filename,
                 self.local_bin.join(&payload.binary_filename).display()
             );
+            if checksum_sha256.is_none() {
+                println!(
+                    "[dry-run] Warning: '{}' would be installed without SHA-256 verification",
+                    plugin.name
+                );
+            }
             return Ok(());
         }
 
@@ -360,7 +368,7 @@ impl Installer {
             source: Some(plugin.location.clone()),
             target: Some(target),
             asset_name: Some(asset_name),
-            checksum_sha256: Some(checksum_sha256),
+            checksum_sha256,
             man_pages: installed_paths.man_page_filenames,
             installed_at_unix: Some(current_unix_timestamp()?),
             pinned,
@@ -542,7 +550,7 @@ impl Installer {
         asset: &ReleaseAsset,
         tag: &str,
         target: &str,
-    ) -> Result<String> {
+    ) -> Result<Option<String>> {
         installer_archive::resolve_expected_sha256(
             plugin, client, assets, asset, tag, target,
         )

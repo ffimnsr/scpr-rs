@@ -41,6 +41,9 @@ pub struct Plugin {
     /// Optional checksum asset filename pattern used when release metadata
     /// does not expose an asset digest directly.
     pub checksum_asset_pattern: Option<String>,
+    /// Explicit opt-in for releases that ship no SHA-256 metadata at all.
+    #[serde(default)]
+    pub allow_insecure_no_checksum: bool,
     /// Optional signature asset filename pattern for release verification.
     pub signature_asset_pattern: Option<String>,
     /// Signature verification backend: `gpg` or `minisign`.
@@ -249,6 +252,7 @@ mod tests {
         assert!(plugin.binary.contains("rg"));
         assert!(plugin.description.is_some());
         assert!(plugin.checksum_asset_pattern.is_some());
+        assert!(!plugin.allow_insecure_no_checksum);
         assert!(plugin.targets.is_some());
         assert!(plugin.signature_asset_pattern.is_none());
     }
@@ -264,10 +268,13 @@ mod tests {
     #[test]
     fn test_parse_all_bundled_plugins() {
         let plugins = load_plugins_from_dir("plugins").unwrap();
+        assert!(plugins.iter().any(|plugin| plugin.name == "difftastic"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "navi"));
         assert!(plugins.iter().any(|plugin| plugin.name == "ripgrep"));
         assert!(plugins.iter().any(|plugin| plugin.name == "fd"));
         assert!(plugins.iter().any(|plugin| plugin.name == "jq"));
         assert!(plugins.iter().any(|plugin| plugin.name == "scpr"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "tw-dl"));
     }
 
     #[test]

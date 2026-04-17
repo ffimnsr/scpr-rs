@@ -2,5 +2,8 @@
 /data.db3
 !/plugins/.gitkeep
 
+.codex
+.env
+
 *.md
 !README.md

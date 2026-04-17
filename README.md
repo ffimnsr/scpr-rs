@@ -26,7 +26,10 @@ Bundled plugins currently include:
 - `starship`
 - `fzf`
 - `skim`
+- `difftastic`
+- `navi`
 - `yt-dlp`
+- `tw-dl`
 - `grex`
 - `just`
 - `dust`
@@ -289,6 +292,8 @@ scpr plugins new owner/repo --output ./plugins/yourtool.toml
 
 `plugins new` inspects the latest GitHub release and writes a starter TOML. It is intentionally best-effort, so review the generated asset pattern, binary path, checksum source, and target mappings before committing it.
 
+If an upstream publishes no GitHub asset digest and no checksum file, a plugin can opt in to an unverified install path with `allow_insecure_no_checksum = true`. This is off by default and should only be used when you accept that `audit` cannot verify the installed binary later.
+
 Manage remote GitHub-backed plugin indexes:
 
 ```bash
@@ -484,6 +489,10 @@ Optional signature fields:
 - `signature_asset_pattern`
 - `signature_format` as `gpg` or `minisign`
 - `signature_key` for minisign public keys or other verifier-specific key material
+
+Optional insecure fallback:
+
+- `allow_insecure_no_checksum = true` only when the upstream publishes no digest or checksum asset and you explicitly accept an unverified install
 
 Optional install customization:
 

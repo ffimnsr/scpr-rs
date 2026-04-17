@@ -216,6 +216,16 @@ pub(crate) fn validate_plugin_file(path: &str) -> Result<PluginValidationReport>
     if plugin.alias.iter().any(|alias| alias.trim().is_empty()) {
         anyhow::bail!("plugin.alias entries must not be empty");
     }
+    if plugin.allow_insecure_no_checksum && plugin.checksum_asset_pattern.is_some() {
+        warnings.push(
+            "allow_insecure_no_checksum is set; checksum verification is still used when checksum_asset_pattern resolves successfully".to_string(),
+        );
+    }
+    if plugin.allow_insecure_no_checksum {
+        warnings.push(
+            "This plugin explicitly allows installs without SHA-256 verification when the upstream publishes no digest or checksum asset".to_string(),
+        );
+    }
 
     let sample_tag = "v0.0.0";
     let os = std::env::consts::OS;
@@ -1340,6 +1350,15 @@ mod tests {
                 .contains("ripgrep-0.0.0-x86_64-unknown-linux-musl.tar.gz")
         );
         assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_validate_plugin_file_warns_for_insecure_no_checksum() {
+        let report = validate_plugin_file("plugins/navi.toml").unwrap();
+        assert_eq!(report.plugin.name, "navi");
+        assert!(report.warnings.iter().any(|warning| {
+            warning.contains("allows installs without SHA-256 verification")
+        }));
     }
 
     #[test]

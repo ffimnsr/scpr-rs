@@ -1,0 +1,16 @@
+[plugin]
+name = "difftastic"
+alias = ["difft", "difftastic"]
+description = "A structural diff tool that understands syntax"
+location = "github:Wilfred/difftastic"
+asset_pattern = "difft-{target}.tar.gz"
+binary = "difft"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-gnu"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"
+"windows-x86_64" = "x86_64-pc-windows-msvc"
+"windows-aarch64" = "aarch64-pc-windows-msvc"

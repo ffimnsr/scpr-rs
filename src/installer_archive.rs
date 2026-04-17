@@ -92,17 +92,24 @@ pub(crate) async fn resolve_expected_sha256(
     asset: &ReleaseAsset,
     tag: &str,
     target: &str,
-) -> Result<String> {
+) -> Result<Option<String>> {
     if let Some(digest) = asset.digest.as_deref() {
-        return parse_sha256_digest(digest);
+        return parse_sha256_digest(digest).map(Some);
     }
 
-    let checksum_pattern = plugin.checksum_asset_pattern.as_deref().ok_or_else(|| {
-        anyhow!(
-            "No SHA-256 metadata configured for plugin '{}'",
+    let Some(checksum_pattern) = plugin.checksum_asset_pattern.as_deref() else {
+        if plugin.allow_insecure_no_checksum {
+            warn!(
+                "Skipping SHA-256 verification for plugin '{}' because the plugin explicitly allows installs without published checksum metadata",
+                plugin.name
+            );
+            return Ok(None);
+        }
+        return Err(anyhow!(
+            "No SHA-256 metadata configured for plugin '{}'. If this upstream does not publish checksums, set `allow_insecure_no_checksum = true` in the plugin to opt in explicitly.",
             plugin.name
-        )
-    })?;
+        ));
+    };
     let checksum_name = plugin.expand_template(checksum_pattern, tag, target);
     let checksum_asset = assets
         .iter()
@@ -120,7 +127,7 @@ pub(crate) async fn resolve_expected_sha256(
         .await?;
     let checksum_text = String::from_utf8(checksum_data)
         .context("Checksum asset is not valid UTF-8 text")?;
-    parse_sha256_checksum_file(&checksum_text, &asset.name)
+    parse_sha256_checksum_file(&checksum_text, &asset.name).map(Some)
 }
 
 pub(crate) async fn verify_signature_if_configured(

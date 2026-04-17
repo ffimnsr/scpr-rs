@@ -1,0 +1,13 @@
+[plugin]
+name = "navi"
+alias = ["navi"]
+description = "An interactive cheatsheet tool for the command-line"
+location = "github:denisidoro/navi"
+asset_pattern = "navi-{tag}-{target}.tar.gz"
+allow_insecure_no_checksum = true
+binary = "./navi"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-gnu"
