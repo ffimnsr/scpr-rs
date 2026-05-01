@@ -172,6 +172,7 @@ scpr install --list-versions ripgrep
 Force-refresh remote plugin indexes instead of waiting for the cache TTL:
 
 ```bash
+scpr --refresh sync --all
 scpr --refresh install ripgrep
 scpr --refresh plugins list
 ```
@@ -297,6 +298,9 @@ If an upstream publishes no GitHub asset digest and no checksum file, a plugin c
 Manage remote GitHub-backed plugin indexes:
 
 ```bash
+scpr sync --all
+scpr update-index ffimnsr/scpr-plugins
+scpr plugins sync --all
 scpr plugins index add ffimnsr/scpr-plugins
 scpr plugins index list
 scpr plugins index pin ripgrep ffimnsr/scpr-plugins
@@ -311,7 +315,7 @@ scpr plugins index sync ffimnsr/scpr-plugins
 scpr plugins index remove ffimnsr/scpr-plugins
 ```
 
-`plugins index sync` prints a per-index diff summary showing which plugins were added, updated, or removed.
+`sync`, `update-index`, `plugins sync`, and `plugins index sync` all perform the same remote index refresh and print a per-index diff summary showing which plugins were added, updated, or removed.
 
 Use an additional plugin directory:
 
@@ -384,7 +388,7 @@ Suggested workflow:
 2. Add one or more plugin TOML files under the repo's `plugins/` directory.
 3. Commit and push the repository.
 4. Add it locally with `scpr plugins index add yourname/scpr-plugins`.
-5. Confirm discovery with `scpr plugins index sync --all` and `scpr plugins list`.
+5. Confirm discovery with `scpr sync --all` and `scpr plugins list`.
 
 Practical tips:
 

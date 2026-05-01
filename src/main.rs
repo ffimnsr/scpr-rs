@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clap::ArgMatches;
 use futures_util::stream::{self, StreamExt};
 use std::path::Path;
 use std::process;
@@ -78,6 +79,9 @@ async fn run() -> Result<()> {
     let installer = installer::Installer::new()?;
 
     match matches.subcommand() {
+        Some(("sync", sub)) => {
+            handle_remote_index_sync(sub, &client).await?;
+        }
         Some(("install", sub)) => {
             if sub.get_flag("list-versions") {
                 let package_values: Vec<&String> = sub
@@ -360,6 +364,9 @@ async fn run() -> Result<()> {
                 warn_duplicate_remote_plugins(&manager)?;
                 print_available_plugins(&plugins, json);
             }
+            Some(("sync", sub)) => {
+                handle_remote_index_sync(sub, &client).await?;
+            }
             Some(("search", sub)) => {
                 let json = sub.get_flag("json");
                 let dirs = resolved_plugin_dirs(
@@ -505,36 +512,7 @@ async fn run() -> Result<()> {
                     println!("Removed remote plugin index '{}'.", index.repo);
                 }
                 Some(("sync", sub)) => {
-                    let manager = remote_index::RemoteIndexManager::new()?;
-                    if sub.get_flag("all") {
-                        if sub.get_one::<String>("repo").is_some() {
-                            anyhow::bail!(
-                                "Use either `plugins index sync <repo>` or `plugins index sync --all`, not both"
-                            );
-                        }
-                        let summaries =
-                            manager.sync_all_indexes_with_summary(&client).await?;
-                        if summaries.is_empty() {
-                            println!("No enabled remote plugin indexes to sync.");
-                        } else {
-                            println!(
-                                "Synced {} remote plugin index(es).",
-                                summaries.len()
-                            );
-                            print_remote_sync_summaries(&summaries);
-                            warn_duplicate_remote_plugins(&manager)?;
-                        }
-                    } else {
-                        let repo = sub.get_one::<String>("repo").ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Missing repo. Use `plugins index sync <owner>/<repo>` or `plugins index sync --all`"
-                            )
-                        })?;
-                        let summary =
-                            manager.sync_one_with_summary(repo, &client).await?;
-                        print_remote_sync_summaries(&[summary]);
-                        warn_duplicate_remote_plugins(&manager)?;
-                    }
+                    handle_remote_index_sync(sub, &client).await?;
                 }
                 Some(("promote", sub)) => {
                     let repo = sub.get_one::<String>("repo").unwrap();
@@ -791,6 +769,38 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+async fn handle_remote_index_sync(
+    sub: &ArgMatches,
+    client: &github::GithubClient,
+) -> Result<()> {
+    let manager = remote_index::RemoteIndexManager::new()?;
+    if sub.get_flag("all") {
+        if sub.get_one::<String>("repo").is_some() {
+            anyhow::bail!(
+                "Use either `sync <repo>` or `sync --all`, not both"
+            );
+        }
+        let summaries = manager.sync_all_indexes_with_summary(client).await?;
+        if summaries.is_empty() {
+            println!("No enabled remote plugin indexes to sync.");
+        } else {
+            println!("Synced {} remote plugin index(es).", summaries.len());
+            print_remote_sync_summaries(&summaries);
+            warn_duplicate_remote_plugins(&manager)?;
+        }
+    } else {
+        let repo = sub.get_one::<String>("repo").ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing repo. Use `sync <owner>/<repo>` or `sync --all`"
+            )
+        })?;
+        let summary = manager.sync_one_with_summary(repo, client).await?;
+        print_remote_sync_summaries(&[summary]);
+        warn_duplicate_remote_plugins(&manager)?;
+    }
+
+    Ok(())
+}
 fn find_plugin_with_suggestion(name: &str, dirs: &[String]) -> Result<plugin::Plugin> {
     match plugin::find_plugin(name, dirs) {
         Ok(plugin) => Ok(plugin),

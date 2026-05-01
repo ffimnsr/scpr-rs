@@ -56,6 +56,10 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
         .action(ArgAction::Set)
         .help("Override the resolved release target triple");
 
+    let plugin_index_sync_command = build_plugin_index_sync_command(
+        "Sync remote plugin indexes",
+    );
+
     Command::new("scpr")
         .bin_name("scpr")
         .version(version)
@@ -66,6 +70,7 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
         .arg(verbose_arg)
         .arg(log_format_arg)
         .arg(refresh_arg)
+        .subcommand(plugin_index_sync_command.clone())
         .subcommand(
             Command::new("install")
                 .about("Install one or more packages")
@@ -217,6 +222,11 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                         ),
                 )
                 .subcommand(
+                    build_plugin_index_sync_command(
+                        "Sync remote plugin indexes",
+                    ),
+                )
+                .subcommand(
                     Command::new("index")
                         .about("Manage remote plugin indexes")
                         .arg_required_else_help(true)
@@ -262,19 +272,9 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                                 ),
                         )
                         .subcommand(
-                            Command::new("sync")
-                                .about("Sync one configured remote plugin index, or all with --all")
-                                .arg(
-                                    Arg::new("repo")
-                                        .required(false)
-                                        .help("GitHub repo in the form <owner>/<repo>"),
-                                )
-                                .arg(
-                                    Arg::new("all")
-                                        .long("all")
-                                        .action(ArgAction::SetTrue)
-                                        .help("Sync all enabled remote plugin indexes"),
-                                ),
+                            build_plugin_index_sync_command(
+                                "Sync one configured remote plugin index, or all with --all",
+                            ),
                         )
                         .subcommand(
                             Command::new("promote")
@@ -495,4 +495,74 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                         .help("Shell to generate completions for (bash, zsh, fish, elvish, powershell)"),
                 ),
         )
+}
+
+fn build_plugin_index_sync_command(about: &'static str) -> Command {
+    Command::new("sync")
+        .visible_alias("update-index")
+        .about(about)
+        .arg(
+            Arg::new("repo")
+                .required(false)
+                .help("GitHub repo in the form <owner>/<repo>"),
+        )
+        .arg(
+            Arg::new("all")
+                .long("all")
+                .action(ArgAction::SetTrue)
+                .help("Sync all enabled remote plugin indexes"),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_cli;
+
+    #[test]
+    fn parses_root_sync_subcommand() {
+        let matches = build_cli("test", "test")
+            .try_get_matches_from(["scpr", "sync", "--all"])
+            .expect("root sync command should parse");
+
+        let Some((name, sub)) = matches.subcommand() else {
+            panic!("expected a subcommand");
+        };
+
+        assert_eq!(name, "sync");
+        assert!(sub.get_flag("all"));
+    }
+
+    #[test]
+    fn parses_root_update_index_alias() {
+        let matches = build_cli("test", "test")
+            .try_get_matches_from(["scpr", "update-index", "owner/repo"])
+            .expect("root update-index alias should parse");
+
+        let Some((name, sub)) = matches.subcommand() else {
+            panic!("expected a subcommand");
+        };
+
+        assert_eq!(name, "sync");
+        assert_eq!(
+            sub.get_one::<String>("repo").map(String::as_str),
+            Some("owner/repo")
+        );
+    }
+
+    #[test]
+    fn parses_plugins_update_index_alias() {
+        let matches = build_cli("test", "test")
+            .try_get_matches_from(["scpr", "plugins", "update-index", "--all"])
+            .expect("plugins update-index alias should parse");
+
+        let Some(("plugins", plugins)) = matches.subcommand() else {
+            panic!("expected plugins subcommand");
+        };
+        let Some((name, sub)) = plugins.subcommand() else {
+            panic!("expected nested subcommand");
+        };
+
+        assert_eq!(name, "sync");
+        assert!(sub.get_flag("all"));
+    }
 }
