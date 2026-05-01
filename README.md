@@ -142,7 +142,10 @@ Update one package:
 scpr update ripgrep
 scpr update ripgrep --target aarch64-apple-darwin
 scpr update scpr
+scpr self update
+scpr self update --tag v0.7.0
 scpr rollback ripgrep
+scpr self downgrade
 ```
 
 Update everything except pinned packages:
@@ -159,6 +162,7 @@ Preview changes without writing anything:
 scpr install ripgrep --dry-run
 scpr update --all --dry-run
 scpr uninstall ripgrep --dry-run
+scpr self uninstall --dry-run
 ```
 
 List available release tags before choosing one:

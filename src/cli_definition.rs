@@ -56,9 +56,8 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
         .action(ArgAction::Set)
         .help("Override the resolved release target triple");
 
-    let plugin_index_sync_command = build_plugin_index_sync_command(
-        "Sync remote plugin indexes",
-    );
+    let plugin_index_sync_command =
+        build_plugin_index_sync_command("Sync remote plugin indexes");
 
     Command::new("scpr")
         .bin_name("scpr")
@@ -487,6 +486,37 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                 .arg(plugins_dir_arg.clone()),
         )
         .subcommand(
+            Command::new("self")
+                .about("Manage the scpr binary itself")
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("update")
+                        .about("Update scpr to the latest release or a specific tag")
+                        .arg(
+                            Arg::new("tag")
+                                .long("tag")
+                                .action(ArgAction::Set)
+                                .help("Update to a specific release tag"),
+                        )
+                        .arg(target_arg.clone())
+                        .arg(dry_run_arg.clone())
+                        .arg(plugins_dir_arg.clone()),
+                )
+                .subcommand(
+                    Command::new("uninstall")
+                        .about("Uninstall scpr from the local user install directory")
+                        .arg(dry_run_arg.clone())
+                        .arg(plugins_dir_arg.clone()),
+                )
+                .subcommand(
+                    Command::new("downgrade")
+                        .about("Reinstall the previous recorded version of scpr")
+                        .arg(target_arg.clone())
+                        .arg(dry_run_arg.clone())
+                        .arg(plugins_dir_arg.clone()),
+                ),
+        )
+        .subcommand(
             Command::new("completions")
                 .about("Print shell completion script to stdout")
                 .arg(
@@ -564,5 +594,76 @@ mod tests {
 
         assert_eq!(name, "sync");
         assert!(sub.get_flag("all"));
+    }
+
+    #[test]
+    fn parses_self_update_subcommand() {
+        let matches = build_cli("test", "test")
+            .try_get_matches_from([
+                "scpr",
+                "self",
+                "update",
+                "--tag",
+                "v1.2.3",
+                "--dry-run",
+            ])
+            .expect("self update command should parse");
+
+        let Some(("self", self_sub)) = matches.subcommand() else {
+            panic!("expected self subcommand");
+        };
+        let Some((name, sub)) = self_sub.subcommand() else {
+            panic!("expected nested self subcommand");
+        };
+
+        assert_eq!(name, "update");
+        assert_eq!(
+            sub.get_one::<String>("tag").map(String::as_str),
+            Some("v1.2.3")
+        );
+        assert!(sub.get_flag("dry-run"));
+    }
+
+    #[test]
+    fn parses_self_uninstall_subcommand() {
+        let matches = build_cli("test", "test")
+            .try_get_matches_from(["scpr", "self", "uninstall", "--dry-run"])
+            .expect("self uninstall command should parse");
+
+        let Some(("self", self_sub)) = matches.subcommand() else {
+            panic!("expected self subcommand");
+        };
+        let Some((name, sub)) = self_sub.subcommand() else {
+            panic!("expected nested self subcommand");
+        };
+
+        assert_eq!(name, "uninstall");
+        assert!(sub.get_flag("dry-run"));
+    }
+
+    #[test]
+    fn parses_self_downgrade_subcommand() {
+        let matches = build_cli("test", "test")
+            .try_get_matches_from([
+                "scpr",
+                "self",
+                "downgrade",
+                "--target",
+                "x86_64-unknown-linux-musl",
+            ])
+            .expect("self downgrade command should parse");
+
+        let Some(("self", self_sub)) = matches.subcommand() else {
+            panic!("expected self subcommand");
+        };
+        let Some((name, sub)) = self_sub.subcommand() else {
+            panic!("expected nested self subcommand");
+        };
+
+        assert_eq!(name, "downgrade");
+        assert_eq!(
+            sub.get_one::<String>("target").map(String::as_str),
+            Some("x86_64-unknown-linux-musl")
+        );
     }
 }

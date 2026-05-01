@@ -29,6 +29,7 @@ use cli_support::{
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PKG_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 const UPDATE_ALL_CONCURRENCY: usize = 4;
+const SELF_PACKAGE_NAME: &str = "scpr";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogFormat {
@@ -754,6 +755,58 @@ async fn run() -> Result<()> {
                 )
                 .await?;
         }
+        Some(("self", sub)) => match sub.subcommand() {
+            Some(("update", sub)) => {
+                let plugin = resolve_self_plugin(
+                    &settings,
+                    &client,
+                    sub.get_one::<String>("plugins-dir"),
+                    force_refresh,
+                )
+                .await?;
+                installer
+                    .install(
+                        &plugin,
+                        &client,
+                        sub.get_one::<String>("tag").map(String::as_str),
+                        sub.get_one::<String>("target").map(String::as_str),
+                        sub.get_flag("dry-run"),
+                    )
+                    .await?;
+            }
+            Some(("uninstall", sub)) => {
+                let plugin = resolve_self_plugin(
+                    &settings,
+                    &client,
+                    sub.get_one::<String>("plugins-dir"),
+                    force_refresh,
+                )
+                .await?;
+                installer
+                    .uninstall(&plugin, sub.get_flag("dry-run"))
+                    .await?;
+            }
+            Some(("downgrade", sub)) => {
+                let plugin = resolve_self_plugin(
+                    &settings,
+                    &client,
+                    sub.get_one::<String>("plugins-dir"),
+                    force_refresh,
+                )
+                .await?;
+                let rollback_version = installer.rollback_version(&plugin.name)?;
+                installer
+                    .install(
+                        &plugin,
+                        &client,
+                        Some(&rollback_version),
+                        sub.get_one::<String>("target").map(String::as_str),
+                        sub.get_flag("dry-run"),
+                    )
+                    .await?;
+            }
+            _ => unreachable!("clap requires a self subcommand"),
+        },
         Some(("completions", sub)) => {
             use clap_complete::{Shell, generate};
             let shell_str = sub.get_one::<String>("shell").unwrap();
@@ -769,6 +822,23 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+async fn resolve_self_plugin(
+    settings: &settings::AppSettings,
+    client: &github::GithubClient,
+    plugins_dir: Option<&String>,
+    force_refresh: bool,
+) -> Result<plugin::Plugin> {
+    let dirs = resolved_plugin_dirs_for_query(
+        settings,
+        client,
+        plugins_dir,
+        SELF_PACKAGE_NAME,
+        force_refresh,
+    )
+    .await?;
+    find_plugin_with_suggestion(SELF_PACKAGE_NAME, &dirs)
+}
+
 async fn handle_remote_index_sync(
     sub: &ArgMatches,
     client: &github::GithubClient,
@@ -776,9 +846,7 @@ async fn handle_remote_index_sync(
     let manager = remote_index::RemoteIndexManager::new()?;
     if sub.get_flag("all") {
         if sub.get_one::<String>("repo").is_some() {
-            anyhow::bail!(
-                "Use either `sync <repo>` or `sync --all`, not both"
-            );
+            anyhow::bail!("Use either `sync <repo>` or `sync --all`, not both");
         }
         let summaries = manager.sync_all_indexes_with_summary(client).await?;
         if summaries.is_empty() {
@@ -790,9 +858,7 @@ async fn handle_remote_index_sync(
         }
     } else {
         let repo = sub.get_one::<String>("repo").ok_or_else(|| {
-            anyhow::anyhow!(
-                "Missing repo. Use `sync <owner>/<repo>` or `sync --all`"
-            )
+            anyhow::anyhow!("Missing repo. Use `sync <owner>/<repo>` or `sync --all`")
         })?;
         let summary = manager.sync_one_with_summary(repo, client).await?;
         print_remote_sync_summaries(&[summary]);
