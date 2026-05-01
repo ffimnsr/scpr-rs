@@ -3,6 +3,7 @@ use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Deserialize;
+use std::error::Error as StdError;
 use std::{
     sync::{
         Arc,
@@ -179,21 +180,37 @@ impl GithubClient {
         repo: &str,
         tag: &str,
     ) -> Result<Release> {
-        let normalized_tag = normalize_tag(tag);
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/releases/tags/{normalized_tag}"
-        );
-        debug!("Fetching release by tag: {url}");
+        let candidates = release_tag_lookup_candidates(tag);
 
-        let response = self.get_with_retries(&url, "GitHub API request").await?;
+        for (index, candidate) in candidates.iter().enumerate() {
+            let url = format!(
+                "https://api.github.com/repos/{owner}/{repo}/releases/tags/{candidate}"
+            );
+            debug!("Fetching release by tag: {url}");
 
-        let release: Release = response
-            .json()
-            .await
-            .context("Failed to parse GitHub release response")?;
+            match self.get_with_retries(&url, "GitHub API request").await {
+                Ok(response) => {
+                    let release: Release = response
+                        .json()
+                        .await
+                        .context("Failed to parse GitHub release response")?;
 
-        debug!("Resolved release tag: {}", release.tag_name);
-        Ok(release)
+                    debug!("Resolved release tag: {}", release.tag_name);
+                    return Ok(release);
+                }
+                Err(err)
+                    if index + 1 < candidates.len()
+                        && is_http_status_error(&err, reqwest::StatusCode::NOT_FOUND) =>
+                {
+                    debug!(
+                        "Release tag '{candidate}' was not found for {owner}/{repo}; trying alternate tag form"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        unreachable!("release_tag_lookup_candidates always yields at least one tag")
     }
 
     pub async fn list_release_tags(
@@ -484,13 +501,40 @@ fn instant_from_unix_epoch(epoch_secs: u64) -> Option<Instant> {
     Some(Instant::now() + Duration::from_secs(wait_secs))
 }
 
-fn normalize_tag(tag: &str) -> String {
-    if tag.starts_with('v') {
-        tag.to_string()
+fn release_tag_lookup_candidates(tag: &str) -> Vec<String> {
+    let alternate = if let Some(stripped) = tag.strip_prefix('v') {
+        stripped.to_string()
     } else {
         format!("v{tag}")
+    };
+
+    if alternate == tag {
+        vec![tag.to_string()]
+    } else {
+        vec![tag.to_string(), alternate]
     }
 }
+
+fn is_http_status_error(error: &anyhow::Error, status: reqwest::StatusCode) -> bool {
+    error
+        .downcast_ref::<HttpStatusError>()
+        .map(|inner| inner.status == status)
+        .unwrap_or(false)
+}
+
+#[derive(Debug)]
+struct HttpStatusError {
+    status: reqwest::StatusCode,
+    message: String,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl StdError for HttpStatusError {}
 
 fn should_retry_status(status: reqwest::StatusCode) -> bool {
     status.is_server_error()
@@ -529,5 +573,29 @@ fn build_http_error(
         );
     }
 
-    anyhow!("{context} returned {status} for {url}")
+    anyhow::Error::new(HttpStatusError {
+        status,
+        message: format!("{context} returned {status} for {url}"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_tag_lookup_candidates;
+
+    #[test]
+    fn release_tag_lookup_candidates_try_exact_tag_before_v_prefix() {
+        assert_eq!(
+            release_tag_lookup_candidates("0.7.13"),
+            vec!["0.7.13".to_string(), "v0.7.13".to_string()]
+        );
+    }
+
+    #[test]
+    fn release_tag_lookup_candidates_try_exact_v_tag_before_plain_version() {
+        assert_eq!(
+            release_tag_lookup_candidates("v0.7.13"),
+            vec!["v0.7.13".to_string(), "0.7.13".to_string()]
+        );
+    }
 }

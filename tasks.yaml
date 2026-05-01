@@ -1,2 +1,25 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ffimnsr/mk-rs/main/docs/schema.json
+
 use_cargo: true
-tasks: {}
+
+tasks:
+  install:
+    commands:
+      - cargo install --path .
+    description: Install the crate.
+  lint:
+    commands:
+      - cargo clippy --all-targets --all-features -- -D warnings
+    description: Run clippy to check for linting issues.
+  format:
+    commands:
+      - cargo fmt --all -- --check
+    description: Check that the code is properly formatted.
+  test:
+    commands:
+      - cargo test --all-features
+    description: Run all tests with all features enabled.
+  build:
+    commands:
+      - cargo build --release
+    description: Build the crate in release mode.
