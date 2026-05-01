@@ -7,6 +7,50 @@ asset_pattern = "{name}-{version}-{target}.tar.gz"
 checksum_asset_pattern = "{name}-{version}-{target}.tar.gz.sha256"
 binary = "{name}-{version}-{target}/scpr"
 man_pages = ["{name}-{version}-{target}/man/scpr.1"]
+post_install = [
+	'''
+shell_name=$(basename "${SHELL:-}")
+case "$shell_name" in
+	bash)
+		rc_file="$HOME/.bashrc"
+		rc_dir="$HOME/.bashrc.d"
+		completion_file="$rc_dir/scpr.sh"
+		completion_line='source <({binary_path} completions bash)'
+		load_pattern='(^|[[:space:]])(source|\.)[[:space:]].*\.bashrc\.d|bashrc\.d/'
+		mkdir -p "$rc_dir"
+		printf '%s\n' "$completion_line" > "$completion_file"
+		touch "$rc_file"
+		if grep -Eq "$load_pattern" "$rc_file"; then
+			exit 0
+		fi
+		grep -Fqx "$completion_line" "$rc_file" || printf '\n%s\n' "$completion_line" >> "$rc_file"
+		;;
+	zsh)
+		rc_file="$HOME/.zshrc"
+		rc_dir="$HOME/.zshrc.d"
+		completion_file="$rc_dir/scpr.sh"
+		completion_line='source <({binary_path} completions zsh)'
+		load_pattern='(^|[[:space:]])(source|\.)[[:space:]].*\.zshrc\.d|zshrc\.d/'
+		mkdir -p "$rc_dir"
+		printf '%s\n' "$completion_line" > "$completion_file"
+		touch "$rc_file"
+		if grep -Eq "$load_pattern" "$rc_file"; then
+			exit 0
+		fi
+		grep -Fqx "$completion_line" "$rc_file" || printf '\n%s\n' "$completion_line" >> "$rc_file"
+		;;
+	fish)
+		conf_d="$HOME/.config/fish/conf.d"
+		completion_file="$conf_d/scpr.fish"
+		mkdir -p "$conf_d"
+		printf '%s\n' '{binary_path} completions fish | source' > "$completion_file"
+		;;
+	*)
+		exit 0
+		;;
+esac
+	'''
+]
 
 [plugin.targets]
 "linux-x86_64" = "x86_64-unknown-linux-musl"

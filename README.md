@@ -542,6 +542,46 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+Testing `post_install` hooks:
+
+`post_install` does not run during `--dry-run`, so test it with a real install in a disposable home directory. A helper script is available for this workflow:
+
+```bash
+scripts/test-post-install.sh bash
+scripts/test-post-install.sh bash --with-loader
+scripts/test-post-install.sh zsh
+scripts/test-post-install.sh fish
+```
+
+The script builds `target/debug/scpr`, creates a disposable `HOME`, installs the local `scpr` plugin from `./plugins`, prints the shell-specific completion files it created, and re-runs the install to check idempotency.
+
+If you want to inspect the temporary home directory after the run, keep it around:
+
+```bash
+scripts/test-post-install.sh bash --keep-temp
+```
+
+Manual equivalent for Bash:
+
+```bash
+cd /home/pastel/Projects/scpr-rs
+cargo build
+
+tmp="$(mktemp -d)"
+export HOME="$tmp/home"
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_DATA_HOME="$HOME/.local/share"
+export SCPR_BIN_DIR="$HOME/.local/bin"
+export SCPR_MAN_DIR="$HOME/.local/share/man/man1"
+
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$SCPR_BIN_DIR" "$SCPR_MAN_DIR"
+
+SHELL=/bin/bash ./target/debug/scpr install scpr --plugins-dir ./plugins
+cat "$HOME/.bashrc.d/scpr.sh"
+cat "$HOME/.bashrc"
+SHELL=/bin/bash ./target/debug/scpr install scpr --plugins-dir ./plugins
+```
+
 Recent test coverage includes:
 
 - plugin parsing and target/template resolution
