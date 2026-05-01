@@ -1,5 +1,16 @@
 #!/bin/sh
 set -e
 
-echo "Linting files..."
-cargo clippy -- -D warnings
+echo "Checking format..."
+cargo fmt --all -- --check
+
+echo "Running tests..."
+cargo test
+
+echo "Checking documentation..."
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+
+echo "Linting with all features..."
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "✓ All pre-commit checks passed"

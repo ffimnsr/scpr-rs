@@ -23,3 +23,11 @@ tasks:
     commands:
       - cargo build --release
     description: Build the crate in release mode.
+  install-githooks:
+    commands:
+      - git config core.hooksPath .githooks
+    description: Install git hooks from the .githooks directory.
+  uninstall-githooks:
+    commands:
+      - git config --unset core.hooksPath
+    description: Uninstall git hooks by unsetting the hooksPath configuration.
