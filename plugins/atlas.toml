@@ -1,11 +1,11 @@
 [plugin]
-name = "mk"
-alias = ["mk"]
-description = "A markdown-based task runner for local project automation"
-location = "github:ffimnsr/mk-rs"
-asset_pattern = "mk-{version}-{target}.tar.gz"
-checksum_asset_pattern = "mk-{version}-{target}.tar.gz.sha256"
-binary = "mk-{version}-{target}/mk"
+name = "atlas"
+alias = ["atlas-context-router", "atlas-context-router-rs"]
+description = "Graph-aware code context for CLI and MCP workflows"
+location = "github:ffimnsr/atlas-context-router-rs"
+asset_pattern = "{name}-{version}-{target}.tar.gz"
+checksum_asset_pattern = "{name}-{version}-{target}.tar.gz.sha256"
+binary = "{name}-{version}-{target}/atlas"
 man_pages = []
 post_install = [
 	'''
@@ -14,8 +14,8 @@ case "$shell_name" in
 	bash)
 		rc_file="$HOME/.bashrc"
 		rc_dir="$HOME/.bashrc.d"
-		completion_file="$rc_dir/mk.sh"
-		completion_line='source <({binary_path} completion bash)'
+		completion_file="$rc_dir/atlas.sh"
+		completion_line='eval "$({binary_path} completions bash)"'
 		load_pattern='(^|[[:space:]])(source|\.)[[:space:]].*\.bashrc\.d|bashrc\.d/'
 		mkdir -p "$rc_dir"
 		printf '%s\n' "$completion_line" > "$completion_file"
@@ -28,8 +28,8 @@ case "$shell_name" in
 	zsh)
 		rc_file="$HOME/.zshrc"
 		rc_dir="$HOME/.zshrc.d"
-		completion_file="$rc_dir/mk.sh"
-		completion_line='source <({binary_path} completion zsh)'
+		completion_file="$rc_dir/atlas.sh"
+		completion_line='eval "$({binary_path} completions zsh)"'
 		load_pattern='(^|[[:space:]])(source|\.)[[:space:]].*\.zshrc\.d|zshrc\.d/'
 		mkdir -p "$rc_dir"
 		printf '%s\n' "$completion_line" > "$completion_file"
@@ -40,10 +40,10 @@ case "$shell_name" in
 		grep -Fqx "$completion_line" "$rc_file" || printf '\n%s\n' "$completion_line" >> "$rc_file"
 		;;
 	fish)
-		conf_d="$HOME/.config/fish/conf.d"
-		completion_file="$conf_d/mk.fish"
+		conf_d="$HOME/.config/fish/completions"
+		completion_file="$conf_d/atlas.fish"
 		mkdir -p "$conf_d"
-		printf '%s\n' '{binary_path} completion fish | source' > "$completion_file"
+		{binary_path} completions fish > "$completion_file"
 		;;
 	*)
 		exit 0
@@ -54,5 +54,4 @@ esac
 
 [plugin.targets]
 "linux-x86_64" = "x86_64-unknown-linux-musl"
-"linux-aarch64" = "aarch64-unknown-linux-gnu"
 "macos-aarch64" = "aarch64-apple-darwin"

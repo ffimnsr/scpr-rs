@@ -258,6 +258,51 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_mk_plugin_targets_and_completion_installer() {
+        let plugin = parse("plugins/mk.toml").unwrap();
+        assert_eq!(plugin.name, "mk");
+        assert_eq!(plugin.resolve_target("macos", "x86_64"), None);
+        assert_eq!(
+            plugin.resolve_target("linux", "aarch64"),
+            Some("aarch64-unknown-linux-gnu".to_string())
+        );
+        assert_eq!(
+            plugin.resolve_target("macos", "aarch64"),
+            Some("aarch64-apple-darwin".to_string())
+        );
+
+        let post_install = plugin.post_install.as_ref().unwrap();
+        assert_eq!(post_install.len(), 1);
+        assert!(post_install[0].contains("completion bash"));
+        assert!(post_install[0].contains("completion zsh"));
+        assert!(post_install[0].contains("completion fish | source"));
+    }
+
+    #[test]
+    fn test_parse_atlas_plugin_targets_and_completion_installer() {
+        let plugin = parse("plugins/atlas.toml").unwrap();
+        assert_eq!(plugin.name, "atlas");
+        assert!(plugin.alias.contains(&"atlas-context-router".to_string()));
+        assert!(plugin.alias.contains(&"atlas-context-router-rs".to_string()));
+        assert_eq!(
+            plugin.resolve_target("linux", "x86_64"),
+            Some("x86_64-unknown-linux-musl".to_string())
+        );
+        assert_eq!(plugin.resolve_target("linux", "aarch64"), None);
+        assert_eq!(plugin.resolve_target("macos", "x86_64"), None);
+        assert_eq!(
+            plugin.resolve_target("macos", "aarch64"),
+            Some("aarch64-apple-darwin".to_string())
+        );
+
+        let post_install = plugin.post_install.as_ref().unwrap();
+        assert_eq!(post_install.len(), 1);
+        assert!(post_install[0].contains("completions bash"));
+        assert!(post_install[0].contains("completions zsh"));
+        assert!(post_install[0].contains("completions fish"));
+    }
+
+    #[test]
     fn test_github_repo_parsing() {
         let plugin = parse("plugins/ripgrep.toml").unwrap();
         let (owner, repo) = plugin.github_repo().unwrap();
@@ -268,6 +313,7 @@ mod tests {
     #[test]
     fn test_parse_all_bundled_plugins() {
         let plugins = load_plugins_from_dir("plugins").unwrap();
+        assert!(plugins.iter().any(|plugin| plugin.name == "atlas"));
         assert!(plugins.iter().any(|plugin| plugin.name == "difftastic"));
         assert!(plugins.iter().any(|plugin| plugin.name == "navi"));
         assert!(plugins.iter().any(|plugin| plugin.name == "ripgrep"));

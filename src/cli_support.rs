@@ -1353,6 +1353,21 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_atlas_plugin_file_expands_current_platform_templates() {
+        let report = validate_plugin_file("plugins/atlas.toml").unwrap();
+        assert_eq!(report.resolved_target.as_deref(), Some("x86_64-unknown-linux-musl"));
+        assert_eq!(report.plugin.name, "atlas");
+        assert!(
+            report
+                .expanded_asset
+                .as_deref()
+                .unwrap()
+                .contains("atlas-0.0.0-x86_64-unknown-linux-musl.tar.gz")
+        );
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
     fn test_validate_plugin_file_warns_for_insecure_no_checksum() {
         let report = validate_plugin_file("plugins/navi.toml").unwrap();
         assert_eq!(report.plugin.name, "navi");
