@@ -13,8 +13,12 @@ tasks:
     description: Run clippy to check for linting issues.
   format:
     commands:
-      - cargo fmt --all -- --check
+      - cargo fmt --all
     description: Check that the code is properly formatted.
+  format-check:
+    commands:
+      - cargo fmt --all -- --check
+    description: Check that the code is properly formatted without making changes.
   test:
     commands:
       - cargo test --all-features

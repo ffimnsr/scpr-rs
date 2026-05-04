@@ -283,7 +283,11 @@ mod tests {
         let plugin = parse("plugins/atlas.toml").unwrap();
         assert_eq!(plugin.name, "atlas");
         assert!(plugin.alias.contains(&"atlas-context-router".to_string()));
-        assert!(plugin.alias.contains(&"atlas-context-router-rs".to_string()));
+        assert!(
+            plugin
+                .alias
+                .contains(&"atlas-context-router-rs".to_string())
+        );
         assert_eq!(
             plugin.resolve_target("linux", "x86_64"),
             Some("x86_64-unknown-linux-musl".to_string())

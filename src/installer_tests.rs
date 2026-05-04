@@ -116,15 +116,10 @@ async fn test_acquire_state_lock_blocks_when_lock_exists() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_acquire_state_lock_clears_stale_lock() {
-    let installer = temp_installer();
+    let mut installer = temp_installer();
+    installer.lock_stale_after_secs = 0;
     let lock_path = installer.state_file_path().with_extension("lock");
     std::fs::write(&lock_path, b"stale").unwrap();
-    std::process::Command::new("touch")
-        .arg("-d")
-        .arg("10 minutes ago")
-        .arg(&lock_path)
-        .status()
-        .unwrap();
 
     let _lock = installer.acquire_state_lock().await.unwrap();
     assert!(lock_path.exists());

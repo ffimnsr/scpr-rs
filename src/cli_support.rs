@@ -1290,7 +1290,12 @@ mod tests {
         parse_state_format, suggested_path_export, validate_plugin_file,
     };
     use crate::installer::StateFormat;
-    use std::path::Path;
+    use std::{env, path::Path};
+
+    fn current_plugin_target(path: &str) -> Option<String> {
+        let plugin = crate::plugin::parse(path).unwrap();
+        plugin.resolve_target(env::consts::OS, env::consts::ARCH)
+    }
 
     #[test]
     fn test_parse_package_request_with_inline_tag() {
@@ -1338,16 +1343,14 @@ mod tests {
     #[test]
     fn test_validate_plugin_file_expands_current_platform_templates() {
         let report = validate_plugin_file("plugins/ripgrep.toml").unwrap();
-        assert_eq!(
-            report.resolved_target.as_deref(),
-            Some("x86_64-unknown-linux-musl")
-        );
+        let expected_target = current_plugin_target("plugins/ripgrep.toml");
+        assert_eq!(report.resolved_target, expected_target.clone());
         assert!(
             report
                 .expanded_asset
                 .as_deref()
                 .unwrap()
-                .contains("ripgrep-0.0.0-x86_64-unknown-linux-musl.tar.gz")
+                .contains(expected_target.as_deref().unwrap())
         );
         assert!(report.warnings.is_empty());
     }
@@ -1355,14 +1358,15 @@ mod tests {
     #[test]
     fn test_validate_atlas_plugin_file_expands_current_platform_templates() {
         let report = validate_plugin_file("plugins/atlas.toml").unwrap();
-        assert_eq!(report.resolved_target.as_deref(), Some("x86_64-unknown-linux-musl"));
+        let expected_target = current_plugin_target("plugins/atlas.toml");
+        assert_eq!(report.resolved_target, expected_target.clone());
         assert_eq!(report.plugin.name, "atlas");
         assert!(
             report
                 .expanded_asset
                 .as_deref()
                 .unwrap()
-                .contains("atlas-0.0.0-x86_64-unknown-linux-musl.tar.gz")
+                .contains(expected_target.as_deref().unwrap())
         );
         assert!(report.warnings.is_empty());
     }
