@@ -1,0 +1,29 @@
+[plugin]
+name = "sqlx"
+alias = ["sqlx-cli", "cargo-sqlx"]
+description = "SQLx CLI for migrations, database management, and offline query preparation"
+location = "github:launchbadge/sqlx"
+build_branch = "main"
+build_script = [
+	"cargo build --release -p sqlx-cli --bin sqlx"
+]
+binary = "target/release/sqlx"
+man_pages = []
+post_install = [
+	'''
+wrapper_path="{install_dir}/cargo-sqlx"
+cat > "$wrapper_path" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "sqlx" ]; then
+	shift
+fi
+exec "{binary_path}" "$@"
+EOF
+chmod 755 "$wrapper_path"
+	'''
+]
+post_uninstall = [
+	'''
+rm -f "{install_dir}/cargo-sqlx"
+	'''
+]

@@ -4,6 +4,7 @@ alias = ["yazi"]
 description = "A small CLI utility: yazi"
 location = "github:sxyazi/yazi"
 asset_pattern = "yazi-v{version}-{target}.tar.gz"
+allow_insecure_no_checksum = true
 binary = "yazi-v{version}-{target}/yazi"
 man_pages = []
 

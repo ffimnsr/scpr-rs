@@ -61,6 +61,11 @@ pub struct GitTreeEntry {
     pub entry_type: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CommitRefResponse {
+    sha: String,
+}
+
 /// A single asset attached to a GitHub release.
 #[derive(Debug, Deserialize)]
 pub struct ReleaseAsset {
@@ -162,6 +167,25 @@ impl GithubClient {
             .json()
             .await
             .context("Failed to parse GitHub git tree response")
+    }
+
+    pub async fn resolve_commit_sha(
+        &self,
+        owner: &str,
+        repo: &str,
+        r#ref: &str,
+    ) -> Result<String> {
+        let url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/commits/{ref}",
+            r#ref = r#ref
+        );
+        debug!("Resolving commit SHA: {url}");
+        let response = self.get_with_retries(&url, "GitHub API request").await?;
+        let commit: CommitRefResponse = response
+            .json()
+            .await
+            .context("Failed to parse GitHub commit response")?;
+        Ok(commit.sha)
     }
 
     pub async fn download_text(&self, url: &str) -> Result<String> {

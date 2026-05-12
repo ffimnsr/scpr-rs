@@ -32,6 +32,14 @@ static EMITTED_PLUGIN_WARNINGS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new
 /// - `{version}` — release version with leading `v` stripped (e.g. "14.1.0")
 /// - `{tag}`     — release tag as returned by GitHub (e.g. "14.1.0" or "v1.2.0")
 /// - `{target}`  — platform target triple resolved from `[plugin.targets]`
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct PluginCompletions {
+    /// Shell command template that prints completion script content to stdout.
+    ///
+    /// Supported placeholders match hook templates plus `{shell}`.
+    pub command: String,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct Plugin {
     pub name: String,
@@ -40,6 +48,7 @@ pub struct Plugin {
     /// GitHub location in the form `github:<owner>/<repo>`.
     pub location: String,
     /// Asset filename pattern with template placeholders.
+    #[serde(default)]
     pub asset_pattern: String,
     /// Optional checksum asset filename pattern used when release metadata
     /// does not expose an asset digest directly.
@@ -53,12 +62,24 @@ pub struct Plugin {
     pub signature_format: Option<String>,
     /// Optional key material or key identifier for signature verification.
     pub signature_key: Option<String>,
+    /// Optional source ref for `--build`; accepts a branch name or tag.
+    pub build_branch: Option<String>,
+    /// Optional commands to build the project from source when `--build` is used.
+    pub build_script: Option<Vec<String>>,
+    /// Optional commands to run after source builds complete.
+    pub post_build: Option<Vec<String>>,
     /// Path to the binary within the extracted archive.
     pub binary: String,
     /// Paths to man pages within the extracted archive.
     pub man_pages: Option<Vec<String>>,
+    /// Optional managed shell completion metadata.
+    pub completions: Option<PluginCompletions>,
     /// Optional commands to run after installation.
     pub post_install: Option<Vec<String>>,
+    /// Optional commands to run after uninstalling tracked files.
+    pub post_uninstall: Option<Vec<String>>,
+    /// Optional commands to remove user-generated data after confirmation.
+    pub cleanup: Option<Vec<String>>,
     /// Map from `<os>-<arch>` key to the target triple used in release asset names.
     pub targets: Option<HashMap<String, String>>,
 }
@@ -206,18 +227,13 @@ pub fn load_plugins_from_dirs(dirs: &[impl AsRef<str>]) -> Result<Vec<Plugin>> {
     let mut load_errors = Vec::new();
     let mut collected_plugins = Vec::new();
     let mut seen = std::collections::HashMap::<String, String>::new();
-    let mut shadowed = std::collections::HashMap::<(String, String), Vec<String>>::new();
+    let shadowed = collect_shadowed_plugins(dirs)?;
 
     for dir in dirs {
         match load_plugins_from_dir(dir.as_ref()) {
             Ok(plugins) => {
                 for plugin in plugins {
-                    if let Some(previous_dir) = seen.get(&plugin.name) {
-                        shadowed
-                            .entry((dir.as_ref().to_string(), previous_dir.clone()))
-                            .or_default()
-                            .push(plugin.name.clone());
-                    } else {
+                    if !seen.contains_key(&plugin.name) {
                         seen.insert(plugin.name.clone(), dir.as_ref().to_string());
                         collected_plugins.push(plugin);
                     }
@@ -236,6 +252,57 @@ pub fn load_plugins_from_dirs(dirs: &[impl AsRef<str>]) -> Result<Vec<Plugin>> {
         ));
     }
 
+    emit_shadowed_plugin_warnings_map(shadowed);
+
+    collected_plugins.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(collected_plugins)
+}
+
+pub fn emit_shadowed_plugin_warnings(dirs: &[impl AsRef<str>]) -> Result<()> {
+    emit_shadowed_plugin_warnings_map(collect_shadowed_plugins(dirs)?);
+    Ok(())
+}
+
+fn collect_shadowed_plugins(
+    dirs: &[impl AsRef<str>],
+) -> Result<std::collections::HashMap<(String, String), Vec<String>>> {
+    let mut load_errors = Vec::new();
+    let mut seen = std::collections::HashMap::<String, String>::new();
+    let mut shadowed = std::collections::HashMap::<(String, String), Vec<String>>::new();
+
+    for dir in dirs {
+        match load_plugins_from_dir(dir.as_ref()) {
+            Ok(plugins) => {
+                for plugin in plugins {
+                    if let Some(previous_dir) = seen.get(&plugin.name) {
+                        shadowed
+                            .entry((dir.as_ref().to_string(), previous_dir.clone()))
+                            .or_default()
+                            .push(plugin.name.clone());
+                    } else {
+                        seen.insert(plugin.name.clone(), dir.as_ref().to_string());
+                    }
+                }
+            }
+            Err(err) => {
+                load_errors.push(format!("{}: {err}", dir.as_ref()));
+            }
+        }
+    }
+
+    if !load_errors.is_empty() {
+        return Err(anyhow!(
+            "Failed to read plugin directories: {}",
+            load_errors.join("; ")
+        ));
+    }
+
+    Ok(shadowed)
+}
+
+fn emit_shadowed_plugin_warnings_map(
+    shadowed: std::collections::HashMap<(String, String), Vec<String>>,
+) {
     let mut shadowed_groups: Vec<_> = shadowed.into_iter().collect();
     shadowed_groups.sort_by(|left, right| left.0.cmp(&right.0));
     for ((current_dir, previous_dir), mut plugin_names) in shadowed_groups {
@@ -246,9 +313,6 @@ pub fn load_plugins_from_dirs(dirs: &[impl AsRef<str>]) -> Result<Vec<Plugin>> {
             &plugin_names,
         ));
     }
-
-    collected_plugins.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(collected_plugins)
 }
 
 fn format_shadowed_plugin_warning(
@@ -301,6 +365,10 @@ mod tests {
         assert!(!plugin.allow_insecure_no_checksum);
         assert!(plugin.targets.is_some());
         assert!(plugin.signature_asset_pattern.is_none());
+        assert!(plugin.build_branch.is_none());
+        assert!(plugin.build_script.is_none());
+        assert!(plugin.post_build.is_none());
+        assert!(plugin.completions.is_none());
     }
 
     #[test]
@@ -316,12 +384,13 @@ mod tests {
             plugin.resolve_target("macos", "aarch64"),
             Some("aarch64-apple-darwin".to_string())
         );
+        assert_eq!(
+            plugin.completions.as_ref().unwrap().command,
+            "{binary_path} completion {shell}"
+        );
 
-        let post_install = plugin.post_install.as_ref().unwrap();
-        assert_eq!(post_install.len(), 1);
-        assert!(post_install[0].contains("completion bash"));
-        assert!(post_install[0].contains("completion zsh"));
-        assert!(post_install[0].contains("completion fish | source"));
+        assert!(plugin.post_install.is_none());
+        assert!(plugin.post_uninstall.is_none());
     }
 
     #[test]
@@ -344,12 +413,53 @@ mod tests {
             plugin.resolve_target("macos", "aarch64"),
             Some("aarch64-apple-darwin".to_string())
         );
+        assert_eq!(
+            plugin.completions.as_ref().unwrap().command,
+            "{binary_path} completions {shell}"
+        );
+
+        assert!(plugin.post_install.is_none());
+        assert!(plugin.post_uninstall.is_none());
+    }
+
+    #[test]
+    fn test_parse_scpr_plugin_targets_and_completion_installer() {
+        let plugin = parse("plugins/scpr.toml").unwrap();
+        assert_eq!(plugin.name, "scpr");
+        assert_eq!(
+            plugin.resolve_target("linux", "aarch64"),
+            Some("aarch64-unknown-linux-musl".to_string())
+        );
+        assert_eq!(
+            plugin.completions.as_ref().unwrap().command,
+            "{binary_path} completions {shell}"
+        );
+        assert!(plugin.post_install.is_none());
+        assert!(plugin.post_uninstall.is_none());
+    }
+
+    #[test]
+    fn test_parse_sqlx_build_only_plugin() {
+        let plugin = parse("plugins/sqlx.toml").unwrap();
+        assert_eq!(plugin.name, "sqlx");
+        assert!(plugin.alias.contains(&"sqlx-cli".to_string()));
+        assert!(plugin.alias.contains(&"cargo-sqlx".to_string()));
+        assert_eq!(plugin.location, "github:launchbadge/sqlx");
+        assert!(plugin.asset_pattern.is_empty());
+        assert_eq!(plugin.build_branch.as_deref(), Some("main"));
+        assert_eq!(plugin.binary, "target/release/sqlx");
+
+        let build_script = plugin.build_script.as_ref().unwrap();
+        assert_eq!(build_script.len(), 1);
+        assert!(build_script[0].contains("cargo build --release -p sqlx-cli"));
 
         let post_install = plugin.post_install.as_ref().unwrap();
         assert_eq!(post_install.len(), 1);
-        assert!(post_install[0].contains("completions bash"));
-        assert!(post_install[0].contains("completions zsh"));
-        assert!(post_install[0].contains("completions fish"));
+        assert!(post_install[0].contains("cargo-sqlx"));
+
+        let post_uninstall = plugin.post_uninstall.as_ref().unwrap();
+        assert_eq!(post_uninstall.len(), 1);
+        assert!(post_uninstall[0].contains("cargo-sqlx"));
     }
 
     #[test]
@@ -370,6 +480,7 @@ mod tests {
         assert!(plugins.iter().any(|plugin| plugin.name == "fd"));
         assert!(plugins.iter().any(|plugin| plugin.name == "jq"));
         assert!(plugins.iter().any(|plugin| plugin.name == "scpr"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "sqlx"));
         assert!(plugins.iter().any(|plugin| plugin.name == "tw-dl"));
     }
 

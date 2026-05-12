@@ -5,8 +5,12 @@ use super::{
 use crate::installer_archive::{
     InstallPayload, parse_sha256_checksum_file, parse_sha256_digest,
 };
-use crate::plugin::Plugin;
+use crate::plugin::{Plugin, PluginCompletions};
+use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn temp_installer() -> Installer {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -39,10 +43,85 @@ fn sample_plugin() -> Plugin {
         signature_asset_pattern: None,
         signature_format: None,
         signature_key: None,
+        build_branch: None,
+        build_script: None,
+        post_build: None,
         binary: "{name}-{version}-{target}/rg".to_string(),
         man_pages: Some(vec!["{name}-{version}-{target}/doc/rg.1".to_string()]),
+        completions: None,
         post_install: None,
+        post_uninstall: None,
+        cleanup: None,
         targets: None,
+    }
+}
+
+fn completion_plugin() -> Plugin {
+    let mut plugin = sample_plugin();
+    plugin.completions = Some(PluginCompletions {
+        command: "{binary_path} {shell}".to_string(),
+    });
+    plugin
+}
+
+fn with_env_vars<R>(pairs: &[(&str, &str)], f: impl FnOnce() -> R) -> R {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
+    let previous = pairs
+        .iter()
+        .map(|(key, _)| ((*key).to_string(), std::env::var_os(key)))
+        .collect::<Vec<_>>();
+    for (key, value) in pairs {
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+    let result = f();
+    for (key, value) in previous {
+        match value {
+            Some(value) => unsafe {
+                std::env::set_var(&key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(&key);
+            },
+        }
+    }
+    result
+}
+
+#[cfg(unix)]
+fn write_test_completion_binary(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(
+        path,
+        b"#!/bin/sh\nprintf 'generated-%s\\n' \"$1\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
+fn sample_installed_package(name: &str, version: &str, binary: &str) -> InstalledPackage {
+    InstalledPackage {
+        name: name.to_string(),
+        version: version.to_string(),
+        binary: binary.to_string(),
+        source: None,
+        target: None,
+        asset_name: None,
+        checksum_sha256: Some("a".repeat(64)),
+        binary_checksum_sha256: Some("a".repeat(64)),
+        man_pages: Vec::new(),
+        installed_at_unix: Some(1),
+        binary_mode: None,
+        binary_owner_uid: None,
+        binary_owner_gid: None,
+        pinned: false,
     }
 }
 
@@ -179,6 +258,145 @@ fn test_commit_install_cleans_orphaned_backup_files() {
     assert!(!backup_path.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn test_managed_completion_install_writes_bash_drop_in_and_profile_line() {
+    let installer = temp_installer();
+    let plugin = completion_plugin();
+    let home = tempfile::tempdir().unwrap();
+    let binary_path = installer.local_bin_dir().join("rg");
+    write_test_completion_binary(&binary_path);
+
+    with_env_vars(
+        &[("HOME", home.path().to_str().unwrap()), ("SHELL", "/bin/bash")],
+        || {
+            installer
+                .run_managed_completion_install(&plugin, "rg", false)
+                .unwrap();
+        },
+    );
+
+    let completion_file = home.path().join(".bashrc.d").join("ripgrep.sh");
+    let profile = home.path().join(".bashrc");
+    assert_eq!(
+        std::fs::read_to_string(completion_file).unwrap(),
+        "generated-bash\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(profile).unwrap(),
+        "[ -f \"$HOME/.bashrc.d/ripgrep.sh\" ] && . \"$HOME/.bashrc.d/ripgrep.sh\"\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_managed_completion_install_skips_profile_line_when_loader_exists() {
+    let installer = temp_installer();
+    let plugin = completion_plugin();
+    let home = tempfile::tempdir().unwrap();
+    let binary_path = installer.local_bin_dir().join("rg");
+    write_test_completion_binary(&binary_path);
+    let profile = home.path().join(".bashrc");
+    std::fs::write(
+        &profile,
+        "for f in \"$HOME/.bashrc.d/\"*.sh; do\n  [ -r \"$f\" ] && . \"$f\"\ndone\n",
+    )
+    .unwrap();
+
+    with_env_vars(
+        &[("HOME", home.path().to_str().unwrap()), ("SHELL", "/bin/bash")],
+        || {
+            installer
+                .run_managed_completion_install(&plugin, "rg", false)
+                .unwrap();
+        },
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(profile).unwrap(),
+        "for f in \"$HOME/.bashrc.d/\"*.sh; do\n  [ -r \"$f\" ] && . \"$f\"\ndone\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_managed_completion_uninstall_removes_generated_files_and_profile_line() {
+    let installer = temp_installer();
+    let plugin = completion_plugin();
+    let home = tempfile::tempdir().unwrap();
+    let bash_file = home.path().join(".bashrc.d").join("ripgrep.sh");
+    let zsh_file = home.path().join(".zshrc.d").join("ripgrep.sh");
+    let fish_file = home
+        .path()
+        .join(".config")
+        .join("fish")
+        .join("completions")
+        .join("ripgrep.fish");
+    std::fs::create_dir_all(bash_file.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(zsh_file.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(fish_file.parent().unwrap()).unwrap();
+    std::fs::write(&bash_file, "bash completion\n").unwrap();
+    std::fs::write(&zsh_file, "zsh completion\n").unwrap();
+    std::fs::write(&fish_file, "fish completion\n").unwrap();
+    std::fs::write(
+        home.path().join(".bashrc"),
+        "first\n[ -f \"$HOME/.bashrc.d/ripgrep.sh\" ] && . \"$HOME/.bashrc.d/ripgrep.sh\"\nlast\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".zshrc"),
+        "[ -f \"$HOME/.zshrc.d/ripgrep.sh\" ] && . \"$HOME/.zshrc.d/ripgrep.sh\"\n",
+    )
+    .unwrap();
+
+    with_env_vars(&[("HOME", home.path().to_str().unwrap())], || {
+        installer.run_managed_completion_uninstall(&plugin, false).unwrap();
+    });
+
+    assert!(!bash_file.exists());
+    assert!(!zsh_file.exists());
+    assert!(!fish_file.exists());
+    assert_eq!(
+        std::fs::read_to_string(home.path().join(".bashrc")).unwrap(),
+        "first\nlast\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.path().join(".zshrc")).unwrap(),
+        ""
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_managed_completion_install_writes_fish_completion_file() {
+    let installer = temp_installer();
+    let plugin = completion_plugin();
+    let home = tempfile::tempdir().unwrap();
+    let binary_path = installer.local_bin_dir().join("rg");
+    write_test_completion_binary(&binary_path);
+
+    with_env_vars(
+        &[("HOME", home.path().to_str().unwrap()), ("SHELL", "/usr/bin/fish")],
+        || {
+            installer
+                .run_managed_completion_install(&plugin, "rg", false)
+                .unwrap();
+        },
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(
+            home.path()
+                .join(".config")
+                .join("fish")
+                .join("completions")
+                .join("ripgrep.fish")
+        )
+        .unwrap(),
+        "generated-fish\n"
+    );
+}
+
 #[test]
 fn test_uninstall_removes_tracked_files_and_state() {
     let installer = temp_installer();
@@ -192,18 +410,13 @@ fn test_uninstall_removes_tracked_files_and_state() {
         .save_state(&State {
             version: STATE_VERSION,
             installed: vec![InstalledPackage {
-                name: "ripgrep".to_string(),
-                version: "v15.1.0".to_string(),
-                binary: "rg".to_string(),
                 source: Some("github:BurntSushi/ripgrep".to_string()),
                 target: Some("x86_64-unknown-linux-musl".to_string()),
                 asset_name: Some(
                     "ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz".to_string(),
                 ),
-                checksum_sha256: Some("a".repeat(64)),
                 man_pages: vec!["rg.1".to_string()],
-                installed_at_unix: Some(1),
-                pinned: false,
+                ..sample_installed_package("ripgrep", "v15.1.0", "rg")
             }],
             history: Vec::new(),
         })
@@ -232,23 +445,12 @@ fn test_audit_detects_modified_binary() {
     installer
         .save_state(&State {
             version: STATE_VERSION,
-            installed: vec![InstalledPackage {
-                name: "ripgrep".to_string(),
-                version: "v15.1.0".to_string(),
-                binary: "rg".to_string(),
-                source: None,
-                target: None,
-                asset_name: None,
-                checksum_sha256: Some("a".repeat(64)),
-                man_pages: Vec::new(),
-                installed_at_unix: Some(1),
-                pinned: false,
-            }],
+            installed: vec![sample_installed_package("ripgrep", "v15.1.0", "rg")],
             history: Vec::new(),
         })
         .unwrap();
 
-    let audit = installer.audit().unwrap();
+    let audit = installer.audit(false).unwrap();
     assert_eq!(audit.len(), 1);
     assert!(matches!(audit[0].status, AuditStatus::Modified));
 }
@@ -269,15 +471,19 @@ fn test_audit_marks_packages_without_checksum_as_untracked() {
                 target: None,
                 asset_name: None,
                 checksum_sha256: None,
+                binary_checksum_sha256: None,
                 man_pages: Vec::new(),
                 installed_at_unix: Some(1),
+                binary_mode: None,
+                binary_owner_uid: None,
+                binary_owner_gid: None,
                 pinned: false,
             }],
             history: Vec::new(),
         })
         .unwrap();
 
-    let audit = installer.audit().unwrap();
+    let audit = installer.audit(false).unwrap();
     assert_eq!(audit.len(), 1);
     assert!(matches!(audit[0].status, AuditStatus::Untracked));
     assert!(
@@ -288,23 +494,175 @@ fn test_audit_marks_packages_without_checksum_as_untracked() {
 }
 
 #[test]
+fn test_audit_marks_legacy_archive_checksum_as_untracked() {
+    let installer = temp_installer();
+    let binary_path = installer.local_bin_dir().join("mk");
+    std::fs::write(&binary_path, b"binary").unwrap();
+
+    installer
+        .save_state(&State {
+            version: STATE_VERSION,
+            installed: vec![InstalledPackage {
+                name: "mk".to_string(),
+                version: "v1.0.0".to_string(),
+                binary: "mk".to_string(),
+                source: None,
+                target: None,
+                asset_name: Some("mk-1.0.0-x86_64-unknown-linux-musl.tar.gz".to_string()),
+                checksum_sha256: Some("a".repeat(64)),
+                binary_checksum_sha256: None,
+                man_pages: Vec::new(),
+                installed_at_unix: Some(1),
+                binary_mode: None,
+                binary_owner_uid: None,
+                binary_owner_gid: None,
+                pinned: false,
+            }],
+            history: Vec::new(),
+        })
+        .unwrap();
+
+    let audit = installer.audit(false).unwrap();
+    assert!(matches!(audit[0].status, AuditStatus::Untracked));
+    assert!(
+        audit[0]
+            .detail
+            .contains("archive checksum, not the extracted binary checksum")
+    );
+}
+
+#[test]
+fn test_audit_describe_reports_owner_and_permissions() {
+    let installer = temp_installer();
+    let binary_path = installer.local_bin_dir().join("rg");
+    std::fs::write(&binary_path, b"binary").unwrap();
+
+    let metadata = std::fs::metadata(&binary_path).unwrap();
+    let baseline = super::audit_baseline_from_metadata(&metadata);
+
+    installer
+        .save_state(&State {
+            version: STATE_VERSION,
+            installed: vec![InstalledPackage {
+                binary_mode: baseline.mode,
+                binary_owner_uid: baseline.owner_uid,
+                binary_owner_gid: baseline.owner_gid,
+                ..sample_installed_package("ripgrep", "v15.1.0", "rg")
+            }],
+            history: Vec::new(),
+        })
+        .unwrap();
+
+    let audit = installer.audit(true).unwrap();
+    let describe = audit[0].describe.as_ref().unwrap();
+    assert_eq!(describe.fingerprint.status, "changed");
+    assert!(describe.permissions.is_some());
+    assert!(describe.owner.is_some());
+}
+
+#[test]
+fn test_prompt_cleanup_confirmation_accepts_yes_after_retry() {
+    let mut input = Cursor::new(b"maybe\nyes\n".to_vec());
+    let mut output = Vec::new();
+
+    let confirmed =
+        super::prompt_cleanup_confirmation(&mut input, &mut output, "ripgrep").unwrap();
+
+    assert!(confirmed);
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Please answer 'y' or 'n'."));
+}
+
+#[test]
+fn test_same_version_already_installed_requires_binary_on_disk() {
+    let installer = temp_installer();
+    installer
+        .save_state(&State {
+            version: STATE_VERSION,
+            installed: vec![sample_installed_package("ripgrep", "v15.1.0", "rg")],
+            history: Vec::new(),
+        })
+        .unwrap();
+
+    assert!(
+        !installer
+            .same_version_already_installed("ripgrep", "v15.1.0")
+            .unwrap()
+    );
+
+    std::fs::write(installer.local_bin_dir().join("rg"), b"binary").unwrap();
+
+    assert!(
+        installer
+            .same_version_already_installed("ripgrep", "v15.1.0")
+            .unwrap()
+    );
+}
+
+#[test]
+fn test_infer_build_commands_prefers_cargo() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='demo'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+
+    let commands =
+        super::infer_build_commands(temp.path(), Some("x86_64-unknown-linux-musl"))
+            .unwrap();
+
+    assert_eq!(
+        commands,
+        vec!["cargo build --release --target x86_64-unknown-linux-musl"]
+    );
+}
+
+#[test]
+fn test_format_build_version_uses_short_sha() {
+    let version = super::format_build_version(
+        "main",
+        "0123456789abcdef0123456789abcdef01234567",
+    );
+
+    assert_eq!(version, "main@0123456789ab");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_first_binary_on_path_returns_first_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let left_binary = left.path().join("sqlx");
+    let right_binary = right.path().join("sqlx");
+
+    std::fs::write(&left_binary, b"#!/bin/sh\n").unwrap();
+    std::fs::write(&right_binary, b"#!/bin/sh\n").unwrap();
+    let mut left_permissions = std::fs::metadata(&left_binary).unwrap().permissions();
+    left_permissions.set_mode(0o755);
+    std::fs::set_permissions(&left_binary, left_permissions).unwrap();
+    let mut right_permissions = std::fs::metadata(&right_binary).unwrap().permissions();
+    right_permissions.set_mode(0o755);
+    std::fs::set_permissions(&right_binary, right_permissions).unwrap();
+
+    let resolved = super::first_binary_in_dirs(
+        "sqlx",
+        vec![left.path().to_path_buf(), right.path().to_path_buf()],
+    )
+    .unwrap();
+
+    assert_eq!(resolved, left_binary);
+}
+
+#[test]
 fn test_pin_records_history() {
     let installer = temp_installer();
     installer
         .save_state(&State {
             version: STATE_VERSION,
-            installed: vec![InstalledPackage {
-                name: "ripgrep".to_string(),
-                version: "v15.1.0".to_string(),
-                binary: "rg".to_string(),
-                source: None,
-                target: None,
-                asset_name: None,
-                checksum_sha256: Some("a".repeat(64)),
-                man_pages: Vec::new(),
-                installed_at_unix: Some(1),
-                pinned: false,
-            }],
+            installed: vec![sample_installed_package("ripgrep", "v15.1.0", "rg")],
             history: Vec::new(),
         })
         .unwrap();
@@ -323,18 +681,7 @@ fn test_rollback_version_returns_previous_installed_version() {
     installer
         .save_state(&State {
             version: STATE_VERSION,
-            installed: vec![InstalledPackage {
-                name: "ripgrep".to_string(),
-                version: "v2".to_string(),
-                binary: "rg".to_string(),
-                source: None,
-                target: None,
-                asset_name: None,
-                checksum_sha256: Some("a".repeat(64)),
-                man_pages: Vec::new(),
-                installed_at_unix: Some(1),
-                pinned: false,
-            }],
+            installed: vec![sample_installed_package("ripgrep", "v2", "rg")],
             history: vec![super::HistoryEvent {
                 package: "ripgrep".to_string(),
                 action: HistoryAction::Updated,
@@ -356,18 +703,7 @@ fn test_restore_state_writes_backup_before_overwrite() {
     installer
         .save_state(&State {
             version: STATE_VERSION,
-            installed: vec![InstalledPackage {
-                name: "ripgrep".to_string(),
-                version: "v1".to_string(),
-                binary: "rg".to_string(),
-                source: None,
-                target: None,
-                asset_name: None,
-                checksum_sha256: Some("a".repeat(64)),
-                man_pages: Vec::new(),
-                installed_at_unix: Some(1),
-                pinned: false,
-            }],
+            installed: vec![sample_installed_package("ripgrep", "v1", "rg")],
             history: Vec::new(),
         })
         .unwrap();
@@ -439,18 +775,7 @@ fn test_export_and_restore_state_json_round_trip() {
     installer
         .save_state(&State {
             version: STATE_VERSION,
-            installed: vec![InstalledPackage {
-                name: "ripgrep".to_string(),
-                version: "v15.1.0".to_string(),
-                binary: "rg".to_string(),
-                source: None,
-                target: None,
-                asset_name: None,
-                checksum_sha256: Some("a".repeat(64)),
-                man_pages: Vec::new(),
-                installed_at_unix: Some(1),
-                pinned: false,
-            }],
+            installed: vec![sample_installed_package("ripgrep", "v15.1.0", "rg")],
             history: Vec::new(),
         })
         .unwrap();
@@ -490,18 +815,7 @@ fn test_load_state_rejects_unsupported_schema_version() {
 fn test_load_state_migrates_legacy_v0_without_version() {
     let installer = temp_installer();
     let legacy = toml::to_string(&LegacyStateV0 {
-        installed: vec![InstalledPackage {
-            name: "ripgrep".to_string(),
-            version: "v15.1.0".to_string(),
-            binary: "rg".to_string(),
-            source: None,
-            target: None,
-            asset_name: None,
-            checksum_sha256: Some("a".repeat(64)),
-            man_pages: Vec::new(),
-            installed_at_unix: Some(1),
-            pinned: false,
-        }],
+        installed: vec![sample_installed_package("ripgrep", "v15.1.0", "rg")],
         history: Vec::new(),
     })
     .unwrap();

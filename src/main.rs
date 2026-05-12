@@ -123,6 +123,8 @@ async fn run() -> Result<()> {
             }
 
             let dry_run = sub.get_flag("dry-run");
+            let force = sub.get_flag("force");
+            let build = sub.get_flag("build");
             for package in package_values {
                 let request = parse_package_request(
                     package,
@@ -141,9 +143,15 @@ async fn run() -> Result<()> {
                     .install(
                         &plugin,
                         &client,
-                        request.tag.as_deref(),
-                        sub.get_one::<String>("target").map(String::as_str),
-                        dry_run,
+                        installer::InstallOptions {
+                            tag: request.tag.as_deref(),
+                            target_override: sub
+                                .get_one::<String>("target")
+                                .map(String::as_str),
+                            dry_run,
+                            force,
+                            build,
+                        },
                     )
                     .await?;
             }
@@ -173,6 +181,8 @@ async fn run() -> Result<()> {
 
             let update_all = sub.get_flag("all");
             let dry_run = sub.get_flag("dry-run");
+            let force = sub.get_flag("force");
+            let build = sub.get_flag("build");
             let package = sub.get_one::<String>("package");
             let requested_tag = sub.get_one::<String>("tag").map(String::as_str);
             let requested_target = sub.get_one::<String>("target").map(String::as_str);
@@ -237,9 +247,13 @@ async fn run() -> Result<()> {
                                 .install(
                                     &plugin,
                                     &client,
-                                    Some(&entry.latest_version),
-                                    None,
-                                    dry_run,
+                                    installer::InstallOptions {
+                                        tag: Some(&entry.latest_version),
+                                        target_override: None,
+                                        dry_run,
+                                        force: false,
+                                        build,
+                                    },
                                 )
                                 .await
                             {
@@ -329,9 +343,13 @@ async fn run() -> Result<()> {
                     .install(
                         &plugin,
                         &client,
-                        request.tag.as_deref(),
-                        requested_target,
-                        dry_run,
+                        installer::InstallOptions {
+                            tag: request.tag.as_deref(),
+                            target_override: requested_target,
+                            dry_run,
+                            force,
+                            build,
+                        },
                     )
                     .await?;
             }
@@ -416,9 +434,15 @@ async fn run() -> Result<()> {
                     .install(
                         &plugin,
                         &client,
-                        sub.get_one::<String>("tag").map(String::as_str),
-                        sub.get_one::<String>("target").map(String::as_str),
-                        true,
+                        installer::InstallOptions {
+                            tag: sub.get_one::<String>("tag").map(String::as_str),
+                            target_override: sub
+                                .get_one::<String>("target")
+                                .map(String::as_str),
+                            dry_run: true,
+                            force: false,
+                            build: false,
+                        },
                     )
                     .await?;
             }
@@ -645,12 +669,12 @@ async fn run() -> Result<()> {
             }
         }
         Some(("verify", _)) => {
-            let records = installer.audit()?;
+            let records = installer.audit(false)?;
             print_audit_records(&records, false);
         }
         Some(("audit", sub)) => {
             let json = sub.get_flag("json");
-            let records = installer.audit()?;
+            let records = installer.audit(sub.get_flag("describe"))?;
             print_audit_records(&records, json);
         }
         Some(("history", sub)) => match sub.subcommand() {
@@ -749,9 +773,15 @@ async fn run() -> Result<()> {
                 .install(
                     &plugin,
                     &client,
-                    Some(&rollback_version),
-                    sub.get_one::<String>("target").map(String::as_str),
-                    sub.get_flag("dry-run"),
+                    installer::InstallOptions {
+                        tag: Some(&rollback_version),
+                        target_override: sub
+                            .get_one::<String>("target")
+                            .map(String::as_str),
+                        dry_run: sub.get_flag("dry-run"),
+                        force: false,
+                        build: false,
+                    },
                 )
                 .await?;
         }
@@ -768,9 +798,15 @@ async fn run() -> Result<()> {
                     .install(
                         &plugin,
                         &client,
-                        sub.get_one::<String>("tag").map(String::as_str),
-                        sub.get_one::<String>("target").map(String::as_str),
-                        sub.get_flag("dry-run"),
+                        installer::InstallOptions {
+                            tag: sub.get_one::<String>("tag").map(String::as_str),
+                            target_override: sub
+                                .get_one::<String>("target")
+                                .map(String::as_str),
+                            dry_run: sub.get_flag("dry-run"),
+                            force: false,
+                            build: false,
+                        },
                     )
                     .await?;
             }
@@ -799,9 +835,15 @@ async fn run() -> Result<()> {
                     .install(
                         &plugin,
                         &client,
-                        Some(&rollback_version),
-                        sub.get_one::<String>("target").map(String::as_str),
-                        sub.get_flag("dry-run"),
+                        installer::InstallOptions {
+                            tag: Some(&rollback_version),
+                            target_override: sub
+                                .get_one::<String>("target")
+                                .map(String::as_str),
+                            dry_run: sub.get_flag("dry-run"),
+                            force: false,
+                            build: false,
+                        },
                     )
                     .await?;
             }

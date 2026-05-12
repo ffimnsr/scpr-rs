@@ -98,6 +98,8 @@ pub(crate) async fn resolved_plugin_dirs(
         }
     }
 
+    plugin::emit_shadowed_plugin_warnings(&dirs)?;
+
     Ok(dirs)
 }
 
@@ -190,7 +192,7 @@ pub(crate) fn validate_plugin_file(path: &str) -> Result<PluginValidationReport>
     if plugin.name.trim().is_empty() {
         anyhow::bail!("plugin.name must not be empty");
     }
-    if plugin.asset_pattern.trim().is_empty() {
+    if plugin.asset_pattern.trim().is_empty() && plugin.build_script.is_none() {
         anyhow::bail!("plugin.asset_pattern must not be empty");
     }
     if plugin.binary.trim().is_empty() {
@@ -226,6 +228,15 @@ pub(crate) fn validate_plugin_file(path: &str) -> Result<PluginValidationReport>
             "This plugin explicitly allows installs without SHA-256 verification when the upstream publishes no digest or checksum asset".to_string(),
         );
     }
+    if plugin.build_branch.is_some() && plugin.build_script.is_none() {
+        anyhow::bail!("plugin.build_branch requires plugin.build_script");
+    }
+    if plugin.asset_pattern.trim().is_empty() {
+        warnings.push(
+            "plugin.asset_pattern is empty; installs for this plugin require `--build`"
+                .to_string(),
+        );
+    }
 
     let sample_tag = "v0.0.0";
     let os = std::env::consts::OS;
@@ -238,8 +249,8 @@ pub(crate) fn validate_plugin_file(path: &str) -> Result<PluginValidationReport>
         expanded_binary,
         expanded_man_pages,
     ) = if let Some(target) = resolved_target.as_deref() {
-        let expanded_asset =
-            plugin.expand_template(&plugin.asset_pattern, sample_tag, target);
+        let expanded_asset = (!plugin.asset_pattern.trim().is_empty())
+            .then(|| plugin.expand_template(&plugin.asset_pattern, sample_tag, target));
         let expanded_checksum = plugin
             .checksum_asset_pattern
             .as_deref()
@@ -257,7 +268,7 @@ pub(crate) fn validate_plugin_file(path: &str) -> Result<PluginValidationReport>
             .map(|pattern| plugin.expand_template(pattern, sample_tag, target))
             .collect::<Vec<_>>();
         (
-            Some(expanded_asset),
+            expanded_asset,
             expanded_checksum,
             expanded_signature,
             Some(expanded_binary),
@@ -969,6 +980,21 @@ pub(crate) fn print_audit_records(records: &[installer::AuditRecord], json: bool
         };
         println!("{:<20} {:<12} {}", record.package, status, record.detail);
         println!("  {}", record.binary_path.display());
+        if let Some(describe) = &record.describe {
+            println!(
+                "  fingerprint: {}",
+                format_audit_aspect(&describe.fingerprint)
+            );
+            if let Some(owner) = &describe.owner {
+                println!("  owner: {}", format_audit_aspect(owner));
+            }
+            if let Some(permissions) = &describe.permissions {
+                println!("  permissions: {}", format_audit_aspect(permissions));
+            }
+            if let Some(size_bytes) = describe.size_bytes {
+                println!("  size: {} bytes", size_bytes);
+            }
+        }
     }
 
     let modified = records
@@ -984,6 +1010,27 @@ pub(crate) fn print_audit_records(records: &[installer::AuditRecord], json: bool
         println!("Audit complete: no modified installed binaries detected.");
     } else {
         println!("Audit complete: {modified} package(s) need attention.");
+    }
+}
+
+fn format_audit_aspect(aspect: &installer::AuditAspect) -> String {
+    match (&aspect.expected, &aspect.actual) {
+        (Some(expected), Some(actual)) => {
+            format!(
+                "{} (expected {}, actual {})",
+                aspect.status, expected, actual
+            )
+        }
+        (Some(expected), None) => {
+            format!(
+                "{} (expected {}, actual unavailable)",
+                aspect.status, expected
+            )
+        }
+        (None, Some(actual)) => {
+            format!("{} (actual {})", aspect.status, actual)
+        }
+        (None, None) => aspect.status.clone(),
     }
 }
 
@@ -1051,7 +1098,14 @@ pub(crate) fn print_plugin_info(plugin: &plugin::Plugin) {
         plugin.description.as_deref().unwrap_or("-")
     );
     println!("Source: {}", plugin.location);
-    println!("Asset Pattern: {}", plugin.asset_pattern);
+    println!(
+        "Asset Pattern: {}",
+        if plugin.asset_pattern.trim().is_empty() {
+            "-"
+        } else {
+            plugin.asset_pattern.as_str()
+        }
+    );
     println!(
         "Checksum Pattern: {}",
         plugin
@@ -1066,6 +1120,26 @@ pub(crate) fn print_plugin_info(plugin: &plugin::Plugin) {
     println!(
         "Signature Format: {}",
         plugin.signature_format.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Build Branch: {}",
+        plugin.build_branch.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Build Script: {}",
+        plugin
+            .build_script
+            .as_deref()
+            .map(|items| items.join(" && "))
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!(
+        "Post Build: {}",
+        plugin
+            .post_build
+            .as_deref()
+            .map(|items| items.join(" && "))
+            .unwrap_or_else(|| "-".to_string())
     );
     println!("Binary Path: {}", plugin.binary);
     println!(
@@ -1290,7 +1364,7 @@ mod tests {
         parse_state_format, suggested_path_export, validate_plugin_file,
     };
     use crate::installer::StateFormat;
-    use std::{env, path::Path};
+    use std::{env, fs, path::Path};
 
     fn current_plugin_target(path: &str) -> Option<String> {
         let plugin = crate::plugin::parse(path).unwrap();
@@ -1378,6 +1452,34 @@ mod tests {
         assert!(report.warnings.iter().any(|warning| {
             warning.contains("allows installs without SHA-256 verification")
         }));
+    }
+
+    #[test]
+    fn test_validate_plugin_file_allows_build_only_plugin() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("sqlx.toml");
+        fs::write(
+            &path,
+            r#"[plugin]
+name = "sqlx"
+alias = ["sqlx-cli"]
+location = "github:launchbadge/sqlx"
+build_script = ["cargo build --release -p sqlx-cli"]
+binary = "target/release/sqlx"
+man_pages = []
+"#,
+        )
+        .unwrap();
+
+        let report = validate_plugin_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(report.plugin.name, "sqlx");
+        assert!(report.expanded_asset.is_none());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("require `--build`"))
+        );
     }
 
     #[test]

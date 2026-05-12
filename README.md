@@ -39,6 +39,7 @@ Bundled plugins currently include:
 - `lsd`
 - `mk`
 - `midas`
+- `sqlx` via `--build`
 
 ## Quick Start
 
@@ -135,6 +136,16 @@ Install a specific release:
 scpr install ripgrep@15.1.0
 scpr install ripgrep --tag 15.1.0
 ```
+
+Build from the source repository instead of using a published release asset:
+
+```bash
+scpr install sqlx --build
+scpr update sqlx --build
+scpr update --all --build
+```
+
+When a matching binary already exists earlier on your `PATH` and is not managed by `scpr`, install and update now print a warning so you can fix shell precedence before assuming the new binary will be used.
 
 Update one package:
 
@@ -377,7 +388,9 @@ signature_format = "minisign"
 signature_key = "RWQf6LRCGA9QpT/a4LhEYu..."
 binary = "{name}-{version}-{target}/rg"
 man_pages = ["{name}-{version}-{target}/doc/rg.1"]
-post_install = ["{binary_path} --generate complete-bash > ~/.local/share/bash-completion/completions/rg"]
+
+[plugin.completions]
+command = "{binary_path} --generate complete-{shell}"
 
 [plugin.targets]
 "linux-x86_64" = "x86_64-unknown-linux-musl"
@@ -505,7 +518,19 @@ Optional insecure fallback:
 Optional install customization:
 
 - `man_pages` can preserve section subdirectories such as `man8/tool.8`
+- `completions.command` lets `scpr` install managed shell completions when the command prints the selected shell completion script to stdout; supported placeholders match hook placeholders plus `{shell}`
 - `post_install` runs shell commands after installation with `{binary_path}`, `{binary_name}`, and `{plugin}` placeholders
+- `post_uninstall` runs shell commands after uninstall for non-completion cleanup that falls outside the managed completion flow
+
+Optional source-build customization:
+
+- `build_branch` chooses the source ref for `--build`; it can be a branch name such as `main` or a tag name
+- `build_script` runs one or more shell commands when `install --build` or `update --build` is used
+- `post_build` runs after the main build step and can generate extras such as man pages or wrapper files
+- `binary` should point to the built executable relative to the repository root when `--build` is used
+- `asset_pattern` may be omitted entirely for build-only plugins, but those plugins must be installed with `--build`
+
+If `build_script` is omitted, `scpr` currently tries a small set of inferred build commands for common source layouts: `cargo build --release`, a two-step CMake release build, or `make`.
 
 ## Safety Model
 
@@ -542,9 +567,9 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Testing `post_install` hooks:
+Testing managed completion installation:
 
-`post_install` does not run during `--dry-run`, so test it with a real install in a disposable home directory. A helper script is available for this workflow:
+Managed completion setup does not run during `--dry-run`, so test it with a real install in a disposable home directory. A helper script is available for this workflow:
 
 ```bash
 scripts/test-post-install.sh bash

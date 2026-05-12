@@ -6,7 +6,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/test-post-install.sh <bash|zsh|fish> [options]
 
-Exercise the scpr plugin post_install hook in a disposable HOME so shell
+Exercise the managed scpr completion install in a disposable HOME so shell
 completion setup can be inspected safely.
 
 Options:
@@ -153,7 +153,7 @@ main() {
       ;;
   esac
 
-  printf 'Testing post_install for %s in %s\n' "$shell_name" "$HOME"
+  printf 'Testing managed completion install for %s in %s\n' "$shell_name" "$HOME"
   SHELL="$shell_path" ./target/debug/scpr install scpr --plugins-dir ./plugins
 
   case "$shell_name" in
@@ -166,7 +166,7 @@ main() {
       print_file_if_exists "$HOME/.zshrc"
       ;;
     fish)
-      print_file_if_exists "$HOME/.config/fish/conf.d/scpr.fish"
+      print_file_if_exists "$HOME/.config/fish/completions/scpr.fish"
       ;;
   esac
 

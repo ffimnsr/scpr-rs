@@ -56,6 +56,16 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
         .action(ArgAction::Set)
         .help("Override the resolved release target triple");
 
+    let force_arg = Arg::new("force")
+        .long("force")
+        .action(ArgAction::SetTrue)
+        .help("Reinstall even when the requested version is already installed");
+
+    let build_arg = Arg::new("build")
+        .long("build")
+        .action(ArgAction::SetTrue)
+        .help("Build from the source repository instead of installing a release asset");
+
     let plugin_index_sync_command =
         build_plugin_index_sync_command("Sync remote plugin indexes");
 
@@ -87,6 +97,8 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                         .help("Install a specific release tag (single package only)"),
                 )
                 .arg(target_arg.clone())
+                .arg(force_arg.clone())
+                .arg(build_arg.clone())
                 .arg(dry_run_arg.clone())
                 .arg(plugins_dir_arg.clone()),
         )
@@ -122,6 +134,8 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                         .help("Update to a specific release tag"),
                 )
                 .arg(target_arg.clone())
+                .arg(force_arg.clone())
+                .arg(build_arg.clone())
                 .arg(dry_run_arg.clone())
                 .arg(plugins_dir_arg.clone()),
         )
@@ -363,6 +377,12 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
         .subcommand(
             Command::new("audit")
                 .about("Audit installed binaries for missing or modified files")
+                .arg(
+                    Arg::new("describe")
+                        .long("describe")
+                        .action(ArgAction::SetTrue)
+                        .help("Describe fingerprint, ownership, and permission drift"),
+                )
                 .arg(json_arg.clone()),
         )
         .subcommand(
@@ -665,5 +685,33 @@ mod tests {
             sub.get_one::<String>("target").map(String::as_str),
             Some("x86_64-unknown-linux-musl")
         );
+    }
+
+    #[test]
+    fn parses_install_force_flag() {
+        let matches = build_cli("test", "test")
+            .try_get_matches_from(["scpr", "install", "ripgrep", "--force"])
+            .expect("install --force should parse");
+
+        let Some((name, sub)) = matches.subcommand() else {
+            panic!("expected a subcommand");
+        };
+
+        assert_eq!(name, "install");
+        assert!(sub.get_flag("force"));
+    }
+
+    #[test]
+    fn parses_audit_describe_flag() {
+        let matches = build_cli("test", "test")
+            .try_get_matches_from(["scpr", "audit", "--describe"])
+            .expect("audit --describe should parse");
+
+        let Some((name, sub)) = matches.subcommand() else {
+            panic!("expected a subcommand");
+        };
+
+        assert_eq!(name, "audit");
+        assert!(sub.get_flag("describe"));
     }
 }
