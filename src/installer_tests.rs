@@ -65,10 +65,7 @@ fn completion_plugin() -> Plugin {
 }
 
 fn with_env_vars<R>(pairs: &[(&str, &str)], f: impl FnOnce() -> R) -> R {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap();
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let previous = pairs
         .iter()
         .map(|(key, _)| ((*key).to_string(), std::env::var_os(key)))
@@ -96,11 +93,7 @@ fn with_env_vars<R>(pairs: &[(&str, &str)], f: impl FnOnce() -> R) -> R {
 fn write_test_completion_binary(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
 
-    std::fs::write(
-        path,
-        b"#!/bin/sh\nprintf 'generated-%s\\n' \"$1\"\n",
-    )
-    .unwrap();
+    std::fs::write(path, b"#!/bin/sh\nprintf 'generated-%s\\n' \"$1\"\n").unwrap();
     let mut permissions = std::fs::metadata(path).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(path, permissions).unwrap();
@@ -268,7 +261,10 @@ fn test_managed_completion_install_writes_bash_drop_in_and_profile_line() {
     write_test_completion_binary(&binary_path);
 
     with_env_vars(
-        &[("HOME", home.path().to_str().unwrap()), ("SHELL", "/bin/bash")],
+        &[
+            ("HOME", home.path().to_str().unwrap()),
+            ("SHELL", "/bin/bash"),
+        ],
         || {
             installer
                 .run_managed_completion_install(&plugin, "rg", false)
@@ -304,7 +300,10 @@ fn test_managed_completion_install_skips_profile_line_when_loader_exists() {
     .unwrap();
 
     with_env_vars(
-        &[("HOME", home.path().to_str().unwrap()), ("SHELL", "/bin/bash")],
+        &[
+            ("HOME", home.path().to_str().unwrap()),
+            ("SHELL", "/bin/bash"),
+        ],
         || {
             installer
                 .run_managed_completion_install(&plugin, "rg", false)
@@ -350,7 +349,9 @@ fn test_managed_completion_uninstall_removes_generated_files_and_profile_line() 
     .unwrap();
 
     with_env_vars(&[("HOME", home.path().to_str().unwrap())], || {
-        installer.run_managed_completion_uninstall(&plugin, false).unwrap();
+        installer
+            .run_managed_completion_uninstall(&plugin, false)
+            .unwrap();
     });
 
     assert!(!bash_file.exists());
@@ -376,7 +377,10 @@ fn test_managed_completion_install_writes_fish_completion_file() {
     write_test_completion_binary(&binary_path);
 
     with_env_vars(
-        &[("HOME", home.path().to_str().unwrap()), ("SHELL", "/usr/bin/fish")],
+        &[
+            ("HOME", home.path().to_str().unwrap()),
+            ("SHELL", "/usr/bin/fish"),
+        ],
         || {
             installer
                 .run_managed_completion_install(&plugin, "rg", false)
@@ -620,10 +624,8 @@ fn test_infer_build_commands_prefers_cargo() {
 
 #[test]
 fn test_format_build_version_uses_short_sha() {
-    let version = super::format_build_version(
-        "main",
-        "0123456789abcdef0123456789abcdef01234567",
-    );
+    let version =
+        super::format_build_version("main", "0123456789abcdef0123456789abcdef01234567");
 
     assert_eq!(version, "main@0123456789ab");
 }

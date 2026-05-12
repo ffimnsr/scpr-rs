@@ -389,78 +389,89 @@ impl Installer {
             if options.build { " from source" } else { "" }
         );
 
-        let (payload, target, asset_name, checksum_sha256, action_verb, version) = if options.build
-        {
-            let build_ref = resolve_build_ref(plugin, client, owner, repo, options.tag).await?;
-            info!("Using source ref: {}", build_ref.source_ref);
+        let (payload, target, asset_name, checksum_sha256, action_verb, version) =
+            if options.build {
+                let build_ref =
+                    resolve_build_ref(plugin, client, owner, repo, options.tag).await?;
+                info!("Using source ref: {}", build_ref.source_ref);
 
-            if !options.force
-                && self.same_version_already_installed(
-                    &plugin.name,
-                    &build_ref.version_label,
-                )?
-            {
-                println!(
-                    "Skipping '{}': version '{}' is already installed. Use --force to reinstall.",
-                    plugin.name, build_ref.version_label
-                );
-                return Ok(());
-            }
+                if !options.force
+                    && self.same_version_already_installed(
+                        &plugin.name,
+                        &build_ref.version_label,
+                    )?
+                {
+                    println!(
+                        "Skipping '{}': version '{}' is already installed. Use --force to reinstall.",
+                        plugin.name, build_ref.version_label
+                    );
+                    return Ok(());
+                }
 
-            let (payload, target) = self
-                .build_install_payload(
-                    plugin,
-                    client,
-                    BuildRequest {
-                        owner,
-                        repo,
-                        source_ref: &build_ref.source_ref,
-                        template_tag: &build_ref.template_tag,
-                        target_override: options.target_override,
-                        dry_run: options.dry_run,
-                    },
+                let (payload, target) = self
+                    .build_install_payload(
+                        plugin,
+                        client,
+                        BuildRequest {
+                            owner,
+                            repo,
+                            source_ref: &build_ref.source_ref,
+                            template_tag: &build_ref.template_tag,
+                            target_override: options.target_override,
+                            dry_run: options.dry_run,
+                        },
+                    )
+                    .await?;
+                (
+                    payload,
+                    target,
+                    None,
+                    None,
+                    "Built and installed",
+                    build_ref.version_label,
                 )
-                .await?;
-            (payload, target, None, None, "Built and installed", build_ref.version_label)
-        } else {
-            let release = match options.tag {
-                Some(tag) => client.get_release_by_tag(owner, repo, tag).await?,
-                None => client.get_latest_release(owner, repo).await?,
-            };
-            let tag = release.tag_name;
-            info!("Using release: {tag}");
+            } else {
+                let release = match options.tag {
+                    Some(tag) => client.get_release_by_tag(owner, repo, tag).await?,
+                    None => client.get_latest_release(owner, repo).await?,
+                };
+                let tag = release.tag_name;
+                info!("Using release: {tag}");
 
-            if !options.force && self.same_version_already_installed(&plugin.name, &tag)? {
-                println!(
-                    "Skipping '{}': version '{}' is already installed. Use --force to reinstall.",
-                    plugin.name, tag
-                );
-                return Ok(());
-            }
-            if plugin.asset_pattern.trim().is_empty() {
-                anyhow::bail!(
-                    "Plugin '{}' does not define a release asset pattern. Re-run this command with --build.",
-                    plugin.name
-                );
-            }
-            let target =
-                resolve_release_target(plugin, os, arch, options.target_override)?;
-            debug!("Resolved target: {target}");
+                if !options.force
+                    && self.same_version_already_installed(&plugin.name, &tag)?
+                {
+                    println!(
+                        "Skipping '{}': version '{}' is already installed. Use --force to reinstall.",
+                        plugin.name, tag
+                    );
+                    return Ok(());
+                }
+                if plugin.asset_pattern.trim().is_empty() {
+                    anyhow::bail!(
+                        "Plugin '{}' does not define a release asset pattern. Re-run this command with --build.",
+                        plugin.name
+                    );
+                }
+                let target =
+                    resolve_release_target(plugin, os, arch, options.target_override)?;
+                debug!("Resolved target: {target}");
 
-            let asset_name = plugin.expand_template(&plugin.asset_pattern, &tag, &target);
-            let binary_path = plugin.expand_template(&plugin.binary, &tag, &target);
-            let man_paths: Vec<String> = plugin
-                .man_pages
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|template| plugin.expand_template(template, &tag, &target))
-                .collect();
+                let asset_name =
+                    plugin.expand_template(&plugin.asset_pattern, &tag, &target);
+                let binary_path = plugin.expand_template(&plugin.binary, &tag, &target);
+                let man_paths: Vec<String> = plugin
+                    .man_pages
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|template| plugin.expand_template(template, &tag, &target))
+                    .collect();
 
-            debug!("Asset: {asset_name}");
-            debug!("Binary path in archive: {binary_path}");
+                debug!("Asset: {asset_name}");
+                debug!("Binary path in archive: {binary_path}");
 
-            let asset = release
+                let asset = release
                 .assets
                 .iter()
                 .find(|candidate| candidate.name == asset_name)
@@ -481,51 +492,51 @@ impl Installer {
                     )
                 })?;
 
-            info!("Downloading {}…", asset.name);
-            let data = client
-                .download_asset(&asset.browser_download_url, asset.size)
-                .await?;
-            let checksum_sha256 = self
-                .resolve_expected_sha256(
+                info!("Downloading {}…", asset.name);
+                let data = client
+                    .download_asset(&asset.browser_download_url, asset.size)
+                    .await?;
+                let checksum_sha256 = self
+                    .resolve_expected_sha256(
+                        plugin,
+                        client,
+                        &release.assets,
+                        asset,
+                        &tag,
+                        &target,
+                    )
+                    .await?;
+                installer_archive::verify_signature_if_configured(
                     plugin,
                     client,
                     &release.assets,
                     asset,
+                    &data,
                     &tag,
                     &target,
                 )
                 .await?;
-            installer_archive::verify_signature_if_configured(
-                plugin,
-                client,
-                &release.assets,
-                asset,
-                &data,
-                &tag,
-                &target,
-            )
-            .await?;
-            if let Some(expected_sha256) = checksum_sha256.as_deref() {
-                self.verify_sha256(&data, expected_sha256)?;
-            }
+                if let Some(expected_sha256) = checksum_sha256.as_deref() {
+                    self.verify_sha256(&data, expected_sha256)?;
+                }
 
-            let payload = installer_archive::extract_install_payload(
-                &asset_name,
-                &data,
-                &binary_path,
-                &man_paths,
-                &plugin.name,
-            )?;
+                let payload = installer_archive::extract_install_payload(
+                    &asset_name,
+                    &data,
+                    &binary_path,
+                    &man_paths,
+                    &plugin.name,
+                )?;
 
-            (
-                payload,
-                Some(target),
-                Some(asset_name),
-                checksum_sha256,
-                "Installed",
-                tag,
-            )
-        };
+                (
+                    payload,
+                    Some(target),
+                    Some(asset_name),
+                    checksum_sha256,
+                    "Installed",
+                    tag,
+                )
+            };
 
         self.warn_if_binary_on_path_is_external(plugin, &payload.binary_filename)?;
         let binary_checksum_sha256 =
@@ -806,13 +817,12 @@ impl Installer {
             .unwrap_or_default()
             .iter()
             .map(|path| {
-                let relative =
-                    expand_build_template(
-                        plugin,
-                        path,
-                        request.template_tag,
-                        target.as_deref(),
-                    )?;
+                let relative = expand_build_template(
+                    plugin,
+                    path,
+                    request.template_tag,
+                    target.as_deref(),
+                )?;
                 let full_path = repo_dir.join(&relative);
                 let filename = full_path
                     .file_name()
@@ -1218,7 +1228,8 @@ impl Installer {
             return Ok(());
         };
         for hook in hooks {
-            let command = self.expand_command_template(hook, plugin, binary_filename, None);
+            let command =
+                self.expand_command_template(hook, plugin, binary_filename, None);
             if dry_run {
                 println!("[dry-run] Would run {hook_kind} hook: {command}");
                 continue;
@@ -1255,10 +1266,7 @@ impl Installer {
         let managed_file = shell.managed_file_path(home, &plugin.name);
         if let Some(parent) = managed_file.parent() {
             fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create completion directory {}",
-                    parent.display()
-                )
+                format!("Failed to create completion directory {}", parent.display())
             })?;
         }
         fs::write(&managed_file, script_contents).with_context(|| {
@@ -1276,10 +1284,7 @@ impl Installer {
                 Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
                 Err(err) => {
                     return Err(err).with_context(|| {
-                        format!(
-                            "Failed to read shell profile {}",
-                            profile_path.display()
-                        )
+                        format!("Failed to read shell profile {}", profile_path.display())
                     });
                 }
             };
