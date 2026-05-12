@@ -1,10 +1,13 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use tracing::debug;
 use walkdir::{DirEntry, WalkDir};
+
+static EMITTED_PLUGIN_WARNINGS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 /// Plugin definition loaded from a TOML file.
 ///
@@ -202,19 +205,18 @@ pub fn find_plugin(name: &str, dirs: &[impl AsRef<str>]) -> Result<Plugin> {
 pub fn load_plugins_from_dirs(dirs: &[impl AsRef<str>]) -> Result<Vec<Plugin>> {
     let mut load_errors = Vec::new();
     let mut collected_plugins = Vec::new();
-    let mut seen = std::collections::HashMap::new();
+    let mut seen = std::collections::HashMap::<String, String>::new();
+    let mut shadowed = std::collections::HashMap::<(String, String), Vec<String>>::new();
 
     for dir in dirs {
         match load_plugins_from_dir(dir.as_ref()) {
             Ok(plugins) => {
                 for plugin in plugins {
                     if let Some(previous_dir) = seen.get(&plugin.name) {
-                        eprintln!(
-                            "warning: plugin '{}' from '{}' is shadowed by earlier plugin directory '{}'",
-                            plugin.name,
-                            dir.as_ref(),
-                            previous_dir
-                        );
+                        shadowed
+                            .entry((dir.as_ref().to_string(), previous_dir.clone()))
+                            .or_default()
+                            .push(plugin.name.clone());
                     } else {
                         seen.insert(plugin.name.clone(), dir.as_ref().to_string());
                         collected_plugins.push(plugin);
@@ -234,8 +236,52 @@ pub fn load_plugins_from_dirs(dirs: &[impl AsRef<str>]) -> Result<Vec<Plugin>> {
         ));
     }
 
+    let mut shadowed_groups: Vec<_> = shadowed.into_iter().collect();
+    shadowed_groups.sort_by(|left, right| left.0.cmp(&right.0));
+    for ((current_dir, previous_dir), mut plugin_names) in shadowed_groups {
+        plugin_names.sort();
+        emit_warning_once(&format_shadowed_plugin_warning(
+            &current_dir,
+            &previous_dir,
+            &plugin_names,
+        ));
+    }
+
     collected_plugins.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(collected_plugins)
+}
+
+fn format_shadowed_plugin_warning(
+    current_dir: &str,
+    previous_dir: &str,
+    plugin_names: &[String],
+) -> String {
+    let plugin_label = if plugin_names.len() == 1 {
+        "plugin"
+    } else {
+        "plugins"
+    };
+
+    format!(
+        "warning: {} {} from '{}' are ignored because an earlier plugin directory takes precedence: '{}'.\n  Shadowed: {}\n  Hint: reorder plugin directories, remove the remote index, or use --plugins-dir if you want local plugins to win.",
+        plugin_names.len(),
+        plugin_label,
+        current_dir,
+        previous_dir,
+        plugin_names.join(", ")
+    )
+}
+
+fn emit_warning_once(message: &str) {
+    let emitted = EMITTED_PLUGIN_WARNINGS.get_or_init(|| Mutex::new(HashSet::new()));
+    let Ok(mut emitted) = emitted.lock() else {
+        eprintln!("{message}");
+        return;
+    };
+
+    if emitted.insert(message.to_string()) {
+        eprintln!("{message}");
+    }
 }
 
 #[cfg(test)]
@@ -431,5 +477,34 @@ mod tests {
             .filter(|plugin| plugin.name == "ripgrep")
             .count();
         assert_eq!(ripgrep_plugins, 1);
+    }
+
+    #[test]
+    fn test_format_shadowed_plugin_warning_groups_plugins() {
+        let warning = format_shadowed_plugin_warning(
+            "plugins",
+            "/tmp/remote-indexes/example",
+            &["bat".to_string(), "starship".to_string()],
+        );
+
+        assert!(warning.contains("2 plugins from 'plugins' are ignored"));
+        assert!(warning.contains("/tmp/remote-indexes/example"));
+        assert!(warning.contains("Shadowed: bat, starship"));
+    }
+
+    #[test]
+    fn test_emit_warning_once_tracks_duplicates() {
+        let unique_key = format!(
+            "warning-test:{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let emitted = EMITTED_PLUGIN_WARNINGS.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut emitted = emitted.lock().unwrap();
+
+        assert!(emitted.insert(unique_key.clone()));
+        assert!(!emitted.insert(unique_key));
     }
 }
