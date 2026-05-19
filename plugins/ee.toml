@@ -1,0 +1,16 @@
+[plugin]
+name = "ee"
+alias = ["ee"]
+description = "A quick simple editor for your needs. Aims to be smooth like butter when opening large files."
+location = "github:ffimnsr/ee"
+asset_pattern = "ee-{version}-{target}.tar.gz"
+checksum_asset_pattern = "ee-{version}-{target}.tar.gz.sha256"
+binary = "ee-{version}-{target}/ee"
+man_pages = []
+
+[plugin.completions]
+command = "{binary_path} do completions {shell}"
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"macos-aarch64" = "aarch64-apple-darwin"
