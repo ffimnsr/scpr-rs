@@ -200,6 +200,7 @@ impl Plugin {
             .iter()
             .map(|file| {
                 let from = self.expand_template(&file.from, tag, target);
+                let from = from.trim_end_matches('/').to_string();
                 if from.trim().is_empty() {
                     return Err(anyhow!(
                         "Plugin '{}' has a files entry with an empty from path",
@@ -247,6 +248,9 @@ impl Plugin {
 
 /// Split an expanded `files.to` value into its destination root and the path
 /// below it.
+///
+/// The placeholder must be followed by `/`, so `{data_home}evil` is rejected
+/// rather than silently treated as `{data_home}/evil`.
 fn split_destination_path(value: &str) -> Option<(FileRoot, &str)> {
     for (placeholder, root) in [
         ("{install_dir}", FileRoot::InstallDir),
@@ -254,7 +258,7 @@ fn split_destination_path(value: &str) -> Option<(FileRoot, &str)> {
         ("{config_home}", FileRoot::ConfigHome),
     ] {
         if let Some(rest) = value.strip_prefix(placeholder) {
-            return Some((root, rest.strip_prefix('/').unwrap_or(rest)));
+            return Some((root, rest.strip_prefix('/')?));
         }
     }
     None
@@ -799,6 +803,29 @@ mod tests {
         assert_eq!(files[1].relative_path, PathBuf::from("ee"));
         assert_eq!(files[2].root, FileRoot::ConfigHome);
         assert_eq!(files[2].relative_path, PathBuf::from("ee/plugins"));
+    }
+
+    #[test]
+    fn test_resolve_files_rejects_missing_separator_after_root() {
+        let mut plugin = parse("plugins/ee.toml").unwrap();
+        plugin.files[0].to = "{data_home}evil".to_string();
+
+        let error = plugin.resolve_files("v1", "target").unwrap_err();
+
+        assert!(
+            error.to_string().contains("files.to must start with"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_files_tolerates_trailing_slash_in_from() {
+        let mut plugin = parse("plugins/ee.toml").unwrap();
+        plugin.files[0].from = "pkg/agent/".to_string();
+
+        let files = plugin.resolve_files("v1", "target").unwrap();
+
+        assert_eq!(files[0].from, "pkg/agent");
     }
 
     #[test]

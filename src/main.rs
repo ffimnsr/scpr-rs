@@ -9,6 +9,7 @@ mod cli_support;
 mod github;
 mod installer;
 mod installer_archive;
+mod installer_verify;
 mod plugin;
 mod plugin_scaffold;
 mod remote_index;

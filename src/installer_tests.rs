@@ -2,8 +2,9 @@ use super::{
     AuditStatus, HistoryAction, InstalledPackage, Installer, LegacyStateV0,
     STATE_VERSION, State, StateFormat,
 };
-use crate::installer_archive::{
-    InstallPayload, InstalledFile, parse_sha256_checksum_file, parse_sha256_digest,
+use crate::installer_archive::{InstallPayload, InstalledFile};
+use crate::installer_verify::{
+    parse_sha256_checksum_file, parse_sha256_digest, sha256_hex,
 };
 use crate::plugin::{Plugin, PluginCompletions};
 use std::io::Cursor;
@@ -236,6 +237,21 @@ fn test_commit_install_writes_binary_and_man_page() {
         std::fs::read(installer.local_man_dir().join("rg.1")).unwrap(),
         b"manual"
     );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let binary_mode = std::fs::metadata(installer.local_bin_dir().join("rg"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(binary_mode & 0o777, 0o755);
+        let man_mode = std::fs::metadata(installer.local_man_dir().join("rg.1"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(man_mode & 0o777, 0o644);
+    }
 }
 
 #[test]
@@ -954,4 +970,91 @@ async fn test_uninstall_removes_additional_files_and_prunes_empty_dirs() {
     assert!(user_data.exists(), "unrelated files must be preserved");
     assert!(!installer.local_bin_dir().join("ee").exists());
     assert!(installer.list_installed().unwrap().is_empty());
+}
+
+fn save_audit_package(installer: &Installer, package: InstalledPackage) {
+    installer
+        .save_state(&State {
+            version: STATE_VERSION,
+            installed: vec![package],
+            history: Vec::new(),
+        })
+        .unwrap();
+}
+
+#[test]
+fn test_audit_reports_ok_when_tracked_files_match() {
+    let installer = temp_installer();
+    std::fs::write(installer.local_bin_dir().join("rg"), b"binary").unwrap();
+    let extra = installer.data_home.join("rg").join("extra.txt");
+    std::fs::create_dir_all(extra.parent().unwrap()).unwrap();
+    std::fs::write(&extra, b"extra").unwrap();
+
+    let mut package = sample_installed_package("ripgrep", "v15.1.0", "rg");
+    package.binary_checksum_sha256 = Some(sha256_hex(b"binary"));
+    package.files = vec![InstalledFile {
+        root: "data_home".to_string(),
+        path: "rg/extra.txt".to_string(),
+        checksum_sha256: sha256_hex(b"extra"),
+    }];
+    save_audit_package(&installer, package);
+
+    let audit = installer.audit(false).unwrap();
+
+    assert_eq!(audit.len(), 1);
+    assert!(
+        matches!(audit[0].status, AuditStatus::Ok),
+        "unexpected detail: {}",
+        audit[0].detail
+    );
+}
+
+#[test]
+fn test_audit_flags_changed_and_missing_tracked_files() {
+    let installer = temp_installer();
+    std::fs::write(installer.local_bin_dir().join("rg"), b"binary").unwrap();
+    let extra = installer.data_home.join("rg").join("extra.txt");
+    std::fs::create_dir_all(extra.parent().unwrap()).unwrap();
+    std::fs::write(&extra, b"tampered").unwrap();
+
+    let mut package = sample_installed_package("ripgrep", "v15.1.0", "rg");
+    package.binary_checksum_sha256 = Some(sha256_hex(b"binary"));
+    package.files = vec![
+        InstalledFile {
+            root: "data_home".to_string(),
+            path: "rg/extra.txt".to_string(),
+            checksum_sha256: sha256_hex(b"extra"),
+        },
+        InstalledFile {
+            root: "data_home".to_string(),
+            path: "rg/missing.txt".to_string(),
+            checksum_sha256: sha256_hex(b"missing"),
+        },
+    ];
+    save_audit_package(&installer, package);
+
+    let audit = installer.audit(false).unwrap();
+
+    assert!(matches!(audit[0].status, AuditStatus::Modified));
+    assert!(audit[0].detail.contains("2 tracked file(s) changed"));
+    assert!(audit[0].detail.contains("rg/extra.txt: contents changed"));
+    assert!(audit[0].detail.contains("rg/missing.txt: missing"));
+}
+
+#[test]
+fn test_audit_ignores_tracked_files_when_binary_is_missing() {
+    let installer = temp_installer();
+    let mut package = sample_installed_package("ripgrep", "v15.1.0", "rg");
+    package.binary_checksum_sha256 = Some(sha256_hex(b"binary"));
+    package.files = vec![InstalledFile {
+        root: "data_home".to_string(),
+        path: "rg/extra.txt".to_string(),
+        checksum_sha256: sha256_hex(b"extra"),
+    }];
+    save_audit_package(&installer, package);
+
+    let audit = installer.audit(false).unwrap();
+
+    assert!(matches!(audit[0].status, AuditStatus::Missing));
+    assert_eq!(audit[0].detail, "Installed binary is missing");
 }

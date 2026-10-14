@@ -1030,7 +1030,7 @@ pub(crate) fn print_audit_records(records: &[installer::AuditRecord], json: bool
         })
         .count();
     if modified == 0 {
-        println!("Audit complete: no modified installed binaries detected.");
+        println!("Audit complete: no modified installed files detected.");
     } else {
         println!("Audit complete: {modified} package(s) need attention.");
     }

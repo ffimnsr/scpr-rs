@@ -9,7 +9,9 @@ binary = "ee-{version}-{target}/ee"
 man_pages = []
 
 # The release archive also ships the OpenRouter ACP agent binary, the
-# tree-sitter runtime, and the bundled xi-lsp plugin.
+# tree-sitter runtime, and the bundled xi-lsp plugin. These mappings mirror
+# the upstream install.sh layout (the plugins subtree intentionally lands in
+# both the data home and the config home, as the official installer does).
 [[plugin.files]]
 from = "ee-{version}-{target}/ee-openrouter-agent"
 to = "{install_dir}/ee-openrouter-agent"

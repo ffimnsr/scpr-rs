@@ -1,5 +1,5 @@
-
 use super::*;
+use crate::installer_verify::sha256_hex;
 use flate2::{Compression, write::GzEncoder};
 
 fn tar_gz(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
@@ -209,12 +209,12 @@ fn test_commit_install_writes_files_and_records_checksums() {
             .unwrap()
             .permissions()
             .mode();
-        assert_eq!(mode & 0o111, 0o111, "agent should be executable");
+        assert_eq!(mode & 0o777, 0o755, "agent should be executable");
         let mode = fs::metadata(data_home.join("pkg/grammars/rust.so"))
             .unwrap()
             .permissions()
             .mode();
-        assert_eq!(mode & 0o111, 0, "data files should not be executable");
+        assert_eq!(mode & 0o777, 0o644, "data files should not be executable");
     }
 }
 
@@ -254,4 +254,87 @@ fn test_commit_install_replaces_existing_additional_files() {
     .unwrap();
 
     assert_eq!(fs::read(data_home.join("pkg/old.txt")).unwrap(), b"new");
+}
+
+#[test]
+fn test_commit_install_rejects_file_that_collides_with_binary() {
+    let temp = tempfile::tempdir().unwrap();
+    let install_dir = temp.path().join("bin");
+    let man_dir = temp.path().join("man");
+    let data_home = temp.path().join("data");
+    let config_home = temp.path().join("config");
+    fs::create_dir_all(&install_dir).unwrap();
+    fs::create_dir_all(&man_dir).unwrap();
+
+    let payload = InstallPayload {
+        binary_filename: "pkg".to_string(),
+        binary_contents: b"binary".to_vec(),
+        man_pages: Vec::new(),
+        files: vec![PayloadFile {
+            root: FileRoot::InstallDir,
+            relative_path: PathBuf::from("pkg"),
+            contents: b"shadow".to_vec(),
+            executable: true,
+        }],
+    };
+
+    let error = commit_install(
+        InstallRoots {
+            install_dir: &install_dir,
+            man_dir: &man_dir,
+            data_home: &data_home,
+            config_home: &config_home,
+        },
+        payload,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("installs more than one file"),
+        "unexpected error: {error}"
+    );
+    // Nothing should have been written before the conflict was detected.
+    assert!(!install_dir.join("pkg").exists());
+}
+
+#[test]
+fn test_commit_install_rejects_duplicate_file_destinations() {
+    let temp = tempfile::tempdir().unwrap();
+    let install_dir = temp.path().join("bin");
+    let man_dir = temp.path().join("man");
+    let data_home = temp.path().join("data");
+    let config_home = temp.path().join("config");
+    fs::create_dir_all(&install_dir).unwrap();
+    fs::create_dir_all(&man_dir).unwrap();
+
+    let duplicate = || PayloadFile {
+        root: FileRoot::DataHome,
+        relative_path: PathBuf::from("pkg/data.json"),
+        contents: b"data".to_vec(),
+        executable: false,
+    };
+
+    let payload = InstallPayload {
+        binary_filename: "pkg".to_string(),
+        binary_contents: b"binary".to_vec(),
+        man_pages: Vec::new(),
+        files: vec![duplicate(), duplicate()],
+    };
+
+    let error = commit_install(
+        InstallRoots {
+            install_dir: &install_dir,
+            man_dir: &man_dir,
+            data_home: &data_home,
+            config_home: &config_home,
+        },
+        payload,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("installs more than one file"),
+        "unexpected error: {error}"
+    );
+    assert!(!data_home.join("pkg/data.json").exists());
 }

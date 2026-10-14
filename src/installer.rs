@@ -3,6 +3,7 @@ use crate::{
     installer_archive::{
         self, InstallPayload, InstallRoots, InstalledFile, InstalledPaths, PayloadFile,
     },
+    installer_verify,
     plugin::{FileRoot, Plugin, ResolvedPluginFile},
     settings::AppSettings,
 };
@@ -518,6 +519,8 @@ impl Installer {
                 .iter()
                 .map(|template| plugin.expand_template(template, &tag, &target))
                 .collect();
+            // Resolve file mappings before downloading so a bad plugin fails fast.
+            let files = plugin.resolve_files(&tag, &target)?;
 
             debug!("Asset: {asset_name}");
             debug!("Binary path in archive: {binary_path}");
@@ -557,7 +560,7 @@ impl Installer {
                     &target,
                 )
                 .await?;
-            installer_archive::verify_signature_if_configured(
+            installer_verify::verify_signature_if_configured(
                 plugin,
                 client,
                 &release.assets,
@@ -571,7 +574,6 @@ impl Installer {
                 self.verify_sha256(&data, expected_sha256)?;
             }
 
-            let files = plugin.resolve_files(&tag, &target)?;
             let payload = installer_archive::extract_install_payload(
                 &asset_name,
                 &data,
@@ -594,7 +596,7 @@ impl Installer {
 
         self.warn_if_binary_on_path_is_external(plugin, &payload.binary_filename)?;
         let binary_checksum_sha256 =
-            installer_archive::sha256_hex(&payload.binary_contents);
+            installer_verify::sha256_hex(&payload.binary_contents);
 
         if options.dry_run {
             println!(
@@ -1180,14 +1182,14 @@ impl Installer {
         tag: &str,
         target: &str,
     ) -> Result<Option<String>> {
-        installer_archive::resolve_expected_sha256(
+        installer_verify::resolve_expected_sha256(
             plugin, client, assets, asset, tag, target,
         )
         .await
     }
 
     fn verify_sha256(&self, data: &[u8], expected_sha256: &str) -> Result<()> {
-        installer_archive::verify_sha256(data, expected_sha256)
+        installer_verify::verify_sha256(data, expected_sha256)
     }
 
     fn commit_install(&self, payload: InstallPayload) -> Result<InstalledPaths> {
@@ -1240,6 +1242,32 @@ impl Installer {
         removed
     }
 
+    /// Verify the additional files tracked for a package.
+    ///
+    /// Returns one message per file that is missing, unreadable, or no longer
+    /// matches the checksum recorded at install time.
+    fn audit_installed_files(&self, files: &[InstalledFile]) -> Vec<String> {
+        let mut issues = Vec::new();
+        for file in files {
+            let Some(root) = FileRoot::from_key(&file.root) else {
+                issues.push(format!(
+                    "{}: unknown destination root '{}'",
+                    file.path, file.root
+                ));
+                continue;
+            };
+            let path = self.root_path(root).join(&file.path);
+            match fs::read(&path) {
+                Ok(contents)
+                    if installer_verify::sha256_hex(&contents)
+                        == file.checksum_sha256 => {}
+                Ok(_) => issues.push(format!("{}: contents changed", file.path)),
+                Err(_) => issues.push(format!("{}: missing", file.path)),
+            }
+        }
+        issues
+    }
+
     /// Print how many additional tracked files were installed per destination root.
     fn print_installed_file_summary(&self, files: &[InstalledFile]) {
         let mut counts: Vec<(FileRoot, usize)> = Vec::new();
@@ -1253,11 +1281,33 @@ impl Installer {
             }
         }
         for (root, count) in counts {
-            println!(
-                "  Installed {} file(s) → {}",
-                count,
-                self.root_path(root).display()
-            );
+            // Name the binaries that landed next to the main one; other roots
+            // can hold hundreds of asset files.
+            let names = if root == FileRoot::InstallDir {
+                files
+                    .iter()
+                    .filter(|file| file.root == root.key())
+                    .filter_map(|file| {
+                        Path::new(&file.path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            if names.is_empty() {
+                println!(
+                    "  Installed {count} file(s) → {}",
+                    self.root_path(root).display()
+                );
+            } else {
+                println!(
+                    "  Installed {count} file(s) → {} ({})",
+                    self.root_path(root).display(),
+                    names.join(", ")
+                );
+            }
         }
     }
 
@@ -1716,7 +1766,7 @@ impl Installer {
             let data = fs::read(&binary_path).with_context(|| {
                 format!("Failed to read installed binary {}", binary_path.display())
             })?;
-            let actual = installer_archive::sha256_hex(&data);
+            let actual = installer_verify::sha256_hex(&data);
             let actual_baseline = audit_baseline_from_metadata(&metadata);
             let describe_record = describe.then(|| AuditDescription {
                 fingerprint: describe_fingerprint_aspect(&expected, &actual),
@@ -1731,15 +1781,33 @@ impl Installer {
                 size_bytes: Some(metadata.len()),
             });
             if actual == expected {
-                records.push(AuditRecord {
-                    package: pkg.name,
-                    binary_path,
-                    status: AuditStatus::Ok,
-                    expected_checksum: Some(expected),
-                    actual_checksum: Some(actual),
-                    detail: "Binary matches the recorded SHA-256 checksum".to_string(),
-                    describe: describe_record,
-                });
+                let file_issues = self.audit_installed_files(&pkg.files);
+                if file_issues.is_empty() {
+                    records.push(AuditRecord {
+                        package: pkg.name,
+                        binary_path,
+                        status: AuditStatus::Ok,
+                        expected_checksum: Some(expected),
+                        actual_checksum: Some(actual),
+                        detail: "Binary matches the recorded SHA-256 checksum"
+                            .to_string(),
+                        describe: describe_record,
+                    });
+                } else {
+                    records.push(AuditRecord {
+                        package: pkg.name,
+                        binary_path,
+                        status: AuditStatus::Modified,
+                        expected_checksum: Some(expected),
+                        actual_checksum: Some(actual),
+                        detail: format!(
+                            "Binary matches, but {} tracked file(s) changed: {}",
+                            file_issues.len(),
+                            summarize_file_issues(&file_issues)
+                        ),
+                        describe: describe_record,
+                    });
+                }
             } else {
                 records.push(AuditRecord {
                     package: pkg.name,
@@ -2130,6 +2198,25 @@ fn prune_empty_parents(path: &Path, root: &Path) {
             Err(_) => break,
         }
     }
+}
+
+/// Render up to a few tracked-file issues for an audit detail line.
+fn summarize_file_issues(issues: &[String]) -> String {
+    const MAX_REPORTED_ISSUES: usize = 3;
+
+    let mut summary = issues
+        .iter()
+        .take(MAX_REPORTED_ISSUES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if issues.len() > MAX_REPORTED_ISSUES {
+        summary.push_str(&format!(
+            "; and {} more",
+            issues.len() - MAX_REPORTED_ISSUES
+        ));
+    }
+    summary
 }
 
 fn prompt_cleanup_confirmation<R: BufRead, W: Write>(
