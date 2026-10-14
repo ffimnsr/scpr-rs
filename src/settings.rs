@@ -19,6 +19,8 @@ struct FileSettings {
 pub struct AppSettings {
     install_dir: PathBuf,
     man_dir: PathBuf,
+    data_home: PathBuf,
+    config_home: PathBuf,
     data_dir: PathBuf,
     plugin_dirs: Vec<String>,
     index_ttl_secs: Option<u64>,
@@ -28,19 +30,27 @@ pub struct AppSettings {
 impl AppSettings {
     pub fn load() -> Result<Self> {
         let home = dirs::home_dir().context("Failed to determine home directory")?;
-        let config_dir = resolve_xdg_dir(
-            env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-            dirs::config_dir(),
-            &home,
-            ".config",
-        );
-        let data_home = resolve_xdg_dir(
-            env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-            dirs::data_local_dir(),
-            &home,
-            ".local/share",
-        );
-        let config_file = config_dir.join("scpr").join("config.toml");
+        let config_home = env::var_os("SCPR_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                resolve_xdg_dir(
+                    env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+                    dirs::config_dir(),
+                    &home,
+                    ".config",
+                )
+            });
+        let data_home = env::var_os("SCPR_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                resolve_xdg_dir(
+                    env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+                    dirs::data_local_dir(),
+                    &home,
+                    ".local/share",
+                )
+            });
+        let config_file = config_home.join("scpr").join("config.toml");
         let file_settings = load_file_settings(&config_file)?;
 
         let install_dir = env::var_os("SCPR_BIN_DIR")
@@ -65,6 +75,8 @@ impl AppSettings {
         Ok(Self {
             install_dir,
             man_dir,
+            data_home,
+            config_home,
             data_dir,
             plugin_dirs,
             index_ttl_secs: Some(file_settings.index_ttl_secs.unwrap_or(600)),
@@ -82,6 +94,16 @@ impl AppSettings {
 
     pub fn man_dir(&self) -> &Path {
         &self.man_dir
+    }
+
+    /// XDG data home (`~/.local/share` by default).
+    pub fn data_home(&self) -> &Path {
+        &self.data_home
+    }
+
+    /// XDG config home (`~/.config` by default).
+    pub fn config_home(&self) -> &Path {
+        &self.config_home
     }
 
     pub fn data_dir(&self) -> &Path {

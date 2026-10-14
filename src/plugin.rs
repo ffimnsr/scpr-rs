@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tracing::debug;
 use walkdir::{DirEntry, WalkDir};
@@ -40,6 +40,63 @@ pub struct PluginCompletions {
     pub command: String,
 }
 
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct PluginFile {
+    /// Path inside the release archive (or the source checkout when `--build`
+    /// is used). When it names a directory, the whole tree is installed.
+    /// Supports the standard template placeholders.
+    pub from: String,
+    /// Destination path. Must start with `{install_dir}`, `{data_home}`, or
+    /// `{config_home}` followed by a relative path. Supports the standard
+    /// template placeholders.
+    pub to: String,
+    /// Force the executable bit on the installed files.
+    #[serde(default)]
+    pub executable: bool,
+}
+
+/// Destination root for a [`PluginFile`] mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileRoot {
+    /// The scpr-managed binary directory (`~/.local/bin` by default).
+    InstallDir,
+    /// The XDG data home (`~/.local/share` by default).
+    DataHome,
+    /// The XDG config home (`~/.config` by default).
+    ConfigHome,
+}
+
+impl FileRoot {
+    /// Stable key persisted in the installer state file.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::InstallDir => "install_dir",
+            Self::DataHome => "data_home",
+            Self::ConfigHome => "config_home",
+        }
+    }
+
+    /// Parse a key produced by [`FileRoot::key`].
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "install_dir" => Some(Self::InstallDir),
+            "data_home" => Some(Self::DataHome),
+            "config_home" => Some(Self::ConfigHome),
+            _ => None,
+        }
+    }
+}
+
+/// A [`PluginFile`] with templates expanded and its destination split into a
+/// root and a relative path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPluginFile {
+    pub from: String,
+    pub root: FileRoot,
+    pub relative_path: PathBuf,
+    pub executable: bool,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct Plugin {
     pub name: String,
@@ -72,6 +129,10 @@ pub struct Plugin {
     pub binary: String,
     /// Paths to man pages within the extracted archive.
     pub man_pages: Option<Vec<String>>,
+    /// Additional files or directory trees to install from the archive (or
+    /// source checkout when `--build` is used), beyond `binary`/`man_pages`.
+    #[serde(default)]
+    pub files: Vec<PluginFile>,
     /// Optional managed shell completion metadata.
     pub completions: Option<PluginCompletions>,
     /// Optional commands to run after installation.
@@ -124,6 +185,91 @@ impl Plugin {
             .replace("{version}", version)
             .replace("{target}", target)
     }
+
+    /// Expand the `files` mappings declared by this plugin.
+    ///
+    /// Fails when a `from` path is empty or escapes the archive root, when a
+    /// `to` path does not start with a supported destination root, or when the
+    /// destination escapes that root.
+    pub fn resolve_files(
+        &self,
+        tag: &str,
+        target: &str,
+    ) -> Result<Vec<ResolvedPluginFile>> {
+        self.files
+            .iter()
+            .map(|file| {
+                let from = self.expand_template(&file.from, tag, target);
+                if from.trim().is_empty() {
+                    return Err(anyhow!(
+                        "Plugin '{}' has a files entry with an empty from path",
+                        self.name
+                    ));
+                }
+                if path_has_traversal(Path::new(&from)) {
+                    return Err(anyhow!(
+                        "Plugin '{}' files.from must be a relative path inside the archive: {from}",
+                        self.name
+                    ));
+                }
+
+                let to = self.expand_template(&file.to, tag, target);
+                let (root, relative_path) =
+                    split_destination_path(&to).ok_or_else(|| {
+                        anyhow!(
+                            "Plugin '{}' files.to must start with {{install_dir}}, {{data_home}}, or {{config_home}}: {to}",
+                            self.name
+                        )
+                    })?;
+                if relative_path.trim().is_empty() {
+                    return Err(anyhow!(
+                        "Plugin '{}' files.to must include a path below the destination root: {to}",
+                        self.name
+                    ));
+                }
+                if path_has_traversal(Path::new(relative_path)) {
+                    return Err(anyhow!(
+                        "Plugin '{}' files.to must not escape its destination root: {to}",
+                        self.name
+                    ));
+                }
+
+                Ok(ResolvedPluginFile {
+                    from,
+                    root,
+                    relative_path: PathBuf::from(relative_path),
+                    executable: file.executable,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Split an expanded `files.to` value into its destination root and the path
+/// below it.
+fn split_destination_path(value: &str) -> Option<(FileRoot, &str)> {
+    for (placeholder, root) in [
+        ("{install_dir}", FileRoot::InstallDir),
+        ("{data_home}", FileRoot::DataHome),
+        ("{config_home}", FileRoot::ConfigHome),
+    ] {
+        if let Some(rest) = value.strip_prefix(placeholder) {
+            return Some((root, rest.strip_prefix('/').unwrap_or(rest)));
+        }
+    }
+    None
+}
+
+/// Whether a relative path escapes its root (absolute paths, prefixes, or `..`).
+pub(crate) fn path_has_traversal(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+                | std::path::Component::ParentDir
+        )
+    })
 }
 
 #[derive(Deserialize)]
@@ -444,7 +590,7 @@ mod tests {
         assert_eq!(plugin.name, "sqlx");
         assert!(plugin.alias.contains(&"sqlx-cli".to_string()));
         assert!(plugin.alias.contains(&"cargo-sqlx".to_string()));
-        assert_eq!(plugin.location, "github:launchbadge/sqlx");
+        assert_eq!(plugin.location, "github:transact-rs/sqlx");
         assert!(plugin.asset_pattern.is_empty());
         assert_eq!(plugin.build_branch.as_deref(), Some("main"));
         assert_eq!(plugin.binary, "target/release/sqlx");
@@ -617,5 +763,81 @@ mod tests {
 
         assert!(emitted.insert(unique_key.clone()));
         assert!(!emitted.insert(unique_key));
+    }
+
+    #[test]
+    fn test_parse_ee_plugin_files() {
+        let plugin = parse("plugins/ee.toml").unwrap();
+        assert_eq!(plugin.files.len(), 3);
+        assert_eq!(
+            plugin.files[0].from,
+            "ee-{version}-{target}/ee-openrouter-agent"
+        );
+        assert_eq!(plugin.files[0].to, "{install_dir}/ee-openrouter-agent");
+        assert!(plugin.files[0].executable);
+        assert_eq!(plugin.files[1].to, "{data_home}/ee");
+        assert!(!plugin.files[1].executable);
+        assert_eq!(plugin.files[2].to, "{config_home}/ee/plugins");
+    }
+
+    #[test]
+    fn test_resolve_files_expands_templates_and_roots() {
+        let plugin = parse("plugins/ee.toml").unwrap();
+        let files = plugin
+            .resolve_files("v0.11.10", "x86_64-unknown-linux-musl")
+            .unwrap();
+
+        assert_eq!(files.len(), 3);
+        assert_eq!(
+            files[0].from,
+            "ee-0.11.10-x86_64-unknown-linux-musl/ee-openrouter-agent"
+        );
+        assert_eq!(files[0].root, FileRoot::InstallDir);
+        assert_eq!(files[0].relative_path, PathBuf::from("ee-openrouter-agent"));
+        assert!(files[0].executable);
+        assert_eq!(files[1].root, FileRoot::DataHome);
+        assert_eq!(files[1].relative_path, PathBuf::from("ee"));
+        assert_eq!(files[2].root, FileRoot::ConfigHome);
+        assert_eq!(files[2].relative_path, PathBuf::from("ee/plugins"));
+    }
+
+    #[test]
+    fn test_resolve_files_rejects_unknown_destination_root() {
+        let mut plugin = parse("plugins/ee.toml").unwrap();
+        plugin.files[0].to = "relative/path".to_string();
+
+        let error = plugin
+            .resolve_files("v0.11.10", "x86_64-unknown-linux-musl")
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("files.to must start with"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_files_rejects_path_traversal() {
+        let mut plugin = parse("plugins/ee.toml").unwrap();
+        plugin.files[0].from = "../outside/agent".to_string();
+
+        let error = plugin.resolve_files("v1", "target").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("files.from must be a relative path"),
+            "unexpected error: {error}"
+        );
+
+        let mut plugin = parse("plugins/ee.toml").unwrap();
+        plugin.files[0].to = "{data_home}/../escape".to_string();
+
+        let error = plugin.resolve_files("v1", "target").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must not escape its destination root"),
+            "unexpected error: {error}"
+        );
     }
 }

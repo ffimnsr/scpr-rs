@@ -69,6 +69,7 @@ pub(crate) struct PluginValidationReport {
     pub(crate) expanded_signature: Option<String>,
     pub(crate) expanded_binary: Option<String>,
     pub(crate) expanded_man_pages: Vec<String>,
+    pub(crate) expanded_files: Vec<String>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -242,6 +243,20 @@ pub(crate) fn validate_plugin_file(path: &str) -> Result<PluginValidationReport>
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     let resolved_target = plugin.resolve_target(os, arch);
+    // Validate `files` mappings even when the current platform has no target
+    // mapping, since the destination roots are platform-independent.
+    let expanded_files = plugin
+        .resolve_files(sample_tag, resolved_target.as_deref().unwrap_or_default())?
+        .iter()
+        .map(|file| {
+            format!(
+                "{} -> {}/{}",
+                file.from,
+                file.root.key(),
+                file.relative_path.display()
+            )
+        })
+        .collect::<Vec<_>>();
     let (
         expanded_asset,
         expanded_checksum,
@@ -295,6 +310,13 @@ pub(crate) fn validate_plugin_file(path: &str) -> Result<PluginValidationReport>
             ));
         }
     }
+    for value in &expanded_files {
+        if value.contains('{') {
+            warnings.push(format!(
+                "files entry still contains an unresolved template placeholder: {value}"
+            ));
+        }
+    }
 
     Ok(PluginValidationReport {
         plugin,
@@ -304,6 +326,7 @@ pub(crate) fn validate_plugin_file(path: &str) -> Result<PluginValidationReport>
         expanded_signature,
         expanded_binary,
         expanded_man_pages,
+        expanded_files,
         warnings,
     })
 }
@@ -1150,6 +1173,19 @@ pub(crate) fn print_plugin_info(plugin: &plugin::Plugin) {
             .map(|items| items.join(", "))
             .unwrap_or_else(|| "-".to_string())
     );
+    println!("Files:");
+    if plugin.files.is_empty() {
+        println!("  -");
+    } else {
+        for file in &plugin.files {
+            println!(
+                "  {} -> {}{}",
+                file.from,
+                file.to,
+                if file.executable { " (executable)" } else { "" }
+            );
+        }
+    }
     println!("Targets:");
     if let Some(targets) = &plugin.targets {
         let mut targets: Vec<_> = targets.iter().collect();
@@ -1218,6 +1254,12 @@ pub(crate) fn print_plugin_validation(report: &PluginValidationReport) {
             "Expanded Man Pages: {}",
             report.expanded_man_pages.join(", ")
         );
+    }
+    if !report.expanded_files.is_empty() {
+        println!("Expanded Files:");
+        for value in &report.expanded_files {
+            println!("  {value}");
+        }
     }
     if report.warnings.is_empty() {
         println!("Warnings: none");
@@ -1463,7 +1505,7 @@ mod tests {
             r#"[plugin]
 name = "sqlx"
 alias = ["sqlx-cli"]
-location = "github:launchbadge/sqlx"
+location = "github:transact-rs/sqlx"
 build_script = ["cargo build --release -p sqlx-cli"]
 binary = "target/release/sqlx"
 man_pages = []
@@ -1479,6 +1521,64 @@ man_pages = []
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("require `--build`"))
+        );
+    }
+
+    #[test]
+    fn test_validate_plugin_file_expands_files_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ee.toml");
+        fs::write(
+            &path,
+            r#"[plugin]
+name = "ee"
+alias = ["ee"]
+location = "github:ffimnsr/ee"
+asset_pattern = "ee-{version}-{target}.tar.gz"
+binary = "ee-{version}-{target}/ee"
+
+[[plugin.files]]
+from = "ee-{version}-{target}/ee-openrouter-agent"
+to = "{install_dir}/ee-openrouter-agent"
+executable = true
+"#,
+        )
+        .unwrap();
+
+        let report = validate_plugin_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(report.expanded_files.len(), 1);
+        assert!(
+            report.expanded_files[0].contains("ee-0.0.0-"),
+            "unexpected expansion: {}",
+            report.expanded_files[0]
+        );
+        assert!(report.expanded_files[0].contains("-> install_dir/"));
+    }
+
+    #[test]
+    fn test_validate_plugin_file_rejects_files_outside_destination_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bad.toml");
+        fs::write(
+            &path,
+            r#"[plugin]
+name = "bad"
+alias = ["bad"]
+location = "github:example/bad"
+asset_pattern = "bad-{version}-{target}.tar.gz"
+binary = "{name}"
+
+[[plugin.files]]
+from = "bad-agent"
+to = "/usr/local/bin/bad-agent"
+"#,
+        )
+        .unwrap();
+
+        let error = validate_plugin_file(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            error.to_string().contains("files.to must start with"),
+            "unexpected error: {error}"
         );
     }
 

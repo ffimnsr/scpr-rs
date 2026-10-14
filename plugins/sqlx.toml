@@ -2,7 +2,7 @@
 name = "sqlx"
 alias = ["sqlx-cli", "cargo-sqlx"]
 description = "SQLx CLI for migrations, database management, and offline query preparation"
-location = "github:launchbadge/sqlx"
+location = "github:transact-rs/sqlx"
 build_branch = "main"
 build_script = [
 	"cargo build --release -p sqlx-cli --bin sqlx"

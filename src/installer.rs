@@ -1,7 +1,9 @@
 use crate::{
     github::{GithubClient, ReleaseAsset},
-    installer_archive::{self, InstallPayload, InstalledPaths},
-    plugin::Plugin,
+    installer_archive::{
+        self, InstallPayload, InstallRoots, InstalledFile, InstalledPaths, PayloadFile,
+    },
+    plugin::{FileRoot, Plugin, ResolvedPluginFile},
     settings::AppSettings,
 };
 use anyhow::{Context, Result, anyhow};
@@ -19,6 +21,7 @@ use std::{
 use tar::Archive;
 use tempfile::NamedTempFile;
 use tracing::{debug, info, warn};
+use walkdir::WalkDir;
 
 const LOCK_RETRY_DELAY_MS: u64 = 100;
 const LOCK_RETRY_ATTEMPTS: usize = 100;
@@ -112,6 +115,10 @@ pub struct InstalledPackage {
     pub binary_checksum_sha256: Option<String>,
     #[serde(default)]
     pub man_pages: Vec<String>,
+    /// Additional files installed from the release archive, tracked so that
+    /// updates and uninstalls can clean them up exactly.
+    #[serde(default)]
+    pub files: Vec<InstalledFile>,
     #[serde(default)]
     pub installed_at_unix: Option<u64>,
     #[serde(default)]
@@ -262,6 +269,17 @@ struct BuildRefResolution {
     version_label: String,
 }
 
+/// Everything `install` needs after resolving a release or build payload.
+struct InstallPlan {
+    payload: InstallPayload,
+    target: Option<String>,
+    asset_name: Option<String>,
+    checksum_sha256: Option<String>,
+    action_verb: &'static str,
+    version: String,
+    files: Vec<ResolvedPluginFile>,
+}
+
 /// Installs and uninstalls GitHub-release binaries into the user's local
 /// directories (`~/.local/bin`, `~/.local/share/man`).
 #[derive(Clone)]
@@ -270,6 +288,10 @@ pub struct Installer {
     local_bin: PathBuf,
     /// `~/.local/share/man/man1`
     local_man: PathBuf,
+    /// `~/.local/share`
+    data_home: PathBuf,
+    /// `~/.config`
+    config_home: PathBuf,
     /// `~/.local/share/scpr/state.toml`
     state_file: PathBuf,
     lock_stale_after_secs: u64,
@@ -285,6 +307,8 @@ impl Installer {
     pub fn from_settings(settings: &AppSettings) -> Result<Self> {
         let local_bin = settings.install_dir().to_path_buf();
         let local_man = settings.man_dir().to_path_buf();
+        let data_home = settings.data_home().to_path_buf();
+        let config_home = settings.config_home().to_path_buf();
         let state_dir = settings.data_dir().to_path_buf();
         let state_file = state_dir.join("state.toml");
 
@@ -298,9 +322,29 @@ impl Installer {
         Ok(Self {
             local_bin,
             local_man,
+            data_home,
+            config_home,
             state_file,
             lock_stale_after_secs: settings.lock_stale_after_secs(),
         })
+    }
+
+    fn roots(&self) -> InstallRoots<'_> {
+        InstallRoots {
+            install_dir: &self.local_bin,
+            man_dir: &self.local_man,
+            data_home: &self.data_home,
+            config_home: &self.config_home,
+        }
+    }
+
+    /// Filesystem path for a `files.to` destination root.
+    fn root_path(&self, root: FileRoot) -> &Path {
+        match root {
+            FileRoot::InstallDir => &self.local_bin,
+            FileRoot::DataHome => &self.data_home,
+            FileRoot::ConfigHome => &self.config_home,
+        }
     }
 
     fn load_state(&self) -> Result<State> {
@@ -389,89 +433,96 @@ impl Installer {
             if options.build { " from source" } else { "" }
         );
 
-        let (payload, target, asset_name, checksum_sha256, action_verb, version) =
-            if options.build {
-                let build_ref =
-                    resolve_build_ref(plugin, client, owner, repo, options.tag).await?;
-                info!("Using source ref: {}", build_ref.source_ref);
+        let InstallPlan {
+            payload,
+            target,
+            asset_name,
+            checksum_sha256,
+            action_verb,
+            version,
+            files,
+        } = if options.build {
+            let build_ref =
+                resolve_build_ref(plugin, client, owner, repo, options.tag).await?;
+            info!("Using source ref: {}", build_ref.source_ref);
 
-                if !options.force
-                    && self.same_version_already_installed(
-                        &plugin.name,
-                        &build_ref.version_label,
-                    )?
-                {
-                    println!(
-                        "Skipping '{}': version '{}' is already installed. Use --force to reinstall.",
-                        plugin.name, build_ref.version_label
-                    );
-                    return Ok(());
-                }
+            if !options.force
+                && self.same_version_already_installed(
+                    &plugin.name,
+                    &build_ref.version_label,
+                )?
+            {
+                println!(
+                    "Skipping '{}': version '{}' is already installed. Use --force to reinstall.",
+                    plugin.name, build_ref.version_label
+                );
+                return Ok(());
+            }
 
-                let (payload, target) = self
-                    .build_install_payload(
-                        plugin,
-                        client,
-                        BuildRequest {
-                            owner,
-                            repo,
-                            source_ref: &build_ref.source_ref,
-                            template_tag: &build_ref.template_tag,
-                            target_override: options.target_override,
-                            dry_run: options.dry_run,
-                        },
-                    )
-                    .await?;
-                (
-                    payload,
-                    target,
-                    None,
-                    None,
-                    "Built and installed",
-                    build_ref.version_label,
+            let (payload, target, files) = self
+                .build_install_payload(
+                    plugin,
+                    client,
+                    BuildRequest {
+                        owner,
+                        repo,
+                        source_ref: &build_ref.source_ref,
+                        template_tag: &build_ref.template_tag,
+                        target_override: options.target_override,
+                        dry_run: options.dry_run,
+                    },
                 )
-            } else {
-                let release = match options.tag {
-                    Some(tag) => client.get_release_by_tag(owner, repo, tag).await?,
-                    None => client.get_latest_release(owner, repo).await?,
-                };
-                let tag = release.tag_name;
-                info!("Using release: {tag}");
+                .await?;
+            InstallPlan {
+                payload,
+                target,
+                asset_name: None,
+                checksum_sha256: None,
+                action_verb: "Built and installed",
+                version: build_ref.version_label,
+                files,
+            }
+        } else {
+            let release = match options.tag {
+                Some(tag) => client.get_release_by_tag(owner, repo, tag).await?,
+                None => client.get_latest_release(owner, repo).await?,
+            };
+            let tag = release.tag_name;
+            info!("Using release: {tag}");
 
-                if !options.force
-                    && self.same_version_already_installed(&plugin.name, &tag)?
-                {
-                    println!(
-                        "Skipping '{}': version '{}' is already installed. Use --force to reinstall.",
-                        plugin.name, tag
-                    );
-                    return Ok(());
-                }
-                if plugin.asset_pattern.trim().is_empty() {
-                    anyhow::bail!(
-                        "Plugin '{}' does not define a release asset pattern. Re-run this command with --build.",
-                        plugin.name
-                    );
-                }
-                let target =
-                    resolve_release_target(plugin, os, arch, options.target_override)?;
-                debug!("Resolved target: {target}");
+            if !options.force
+                && self.same_version_already_installed(&plugin.name, &tag)?
+            {
+                println!(
+                    "Skipping '{}': version '{}' is already installed. Use --force to reinstall.",
+                    plugin.name, tag
+                );
+                return Ok(());
+            }
+            if plugin.asset_pattern.trim().is_empty() {
+                anyhow::bail!(
+                    "Plugin '{}' does not define a release asset pattern. Re-run this command with --build.",
+                    plugin.name
+                );
+            }
+            let target =
+                resolve_release_target(plugin, os, arch, options.target_override)?;
+            debug!("Resolved target: {target}");
 
-                let asset_name =
-                    plugin.expand_template(&plugin.asset_pattern, &tag, &target);
-                let binary_path = plugin.expand_template(&plugin.binary, &tag, &target);
-                let man_paths: Vec<String> = plugin
-                    .man_pages
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|template| plugin.expand_template(template, &tag, &target))
-                    .collect();
+            let asset_name = plugin.expand_template(&plugin.asset_pattern, &tag, &target);
+            let binary_path = plugin.expand_template(&plugin.binary, &tag, &target);
+            let man_paths: Vec<String> = plugin
+                .man_pages
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|template| plugin.expand_template(template, &tag, &target))
+                .collect();
 
-                debug!("Asset: {asset_name}");
-                debug!("Binary path in archive: {binary_path}");
+            debug!("Asset: {asset_name}");
+            debug!("Binary path in archive: {binary_path}");
 
-                let asset = release
+            let asset = release
                 .assets
                 .iter()
                 .find(|candidate| candidate.name == asset_name)
@@ -492,51 +543,54 @@ impl Installer {
                     )
                 })?;
 
-                info!("Downloading {}…", asset.name);
-                let data = client
-                    .download_asset(&asset.browser_download_url, asset.size)
-                    .await?;
-                let checksum_sha256 = self
-                    .resolve_expected_sha256(
-                        plugin,
-                        client,
-                        &release.assets,
-                        asset,
-                        &tag,
-                        &target,
-                    )
-                    .await?;
-                installer_archive::verify_signature_if_configured(
+            info!("Downloading {}…", asset.name);
+            let data = client
+                .download_asset(&asset.browser_download_url, asset.size)
+                .await?;
+            let checksum_sha256 = self
+                .resolve_expected_sha256(
                     plugin,
                     client,
                     &release.assets,
                     asset,
-                    &data,
                     &tag,
                     &target,
                 )
                 .await?;
-                if let Some(expected_sha256) = checksum_sha256.as_deref() {
-                    self.verify_sha256(&data, expected_sha256)?;
-                }
+            installer_archive::verify_signature_if_configured(
+                plugin,
+                client,
+                &release.assets,
+                asset,
+                &data,
+                &tag,
+                &target,
+            )
+            .await?;
+            if let Some(expected_sha256) = checksum_sha256.as_deref() {
+                self.verify_sha256(&data, expected_sha256)?;
+            }
 
-                let payload = installer_archive::extract_install_payload(
-                    &asset_name,
-                    &data,
-                    &binary_path,
-                    &man_paths,
-                    &plugin.name,
-                )?;
+            let files = plugin.resolve_files(&tag, &target)?;
+            let payload = installer_archive::extract_install_payload(
+                &asset_name,
+                &data,
+                &binary_path,
+                &man_paths,
+                &files,
+                &plugin.name,
+            )?;
 
-                (
-                    payload,
-                    Some(target),
-                    Some(asset_name),
-                    checksum_sha256,
-                    "Installed",
-                    tag,
-                )
-            };
+            InstallPlan {
+                payload,
+                target: Some(target),
+                asset_name: Some(asset_name),
+                checksum_sha256,
+                action_verb: "Installed",
+                version: tag,
+                files,
+            }
+        };
 
         self.warn_if_binary_on_path_is_external(plugin, &payload.binary_filename)?;
         let binary_checksum_sha256 =
@@ -548,6 +602,15 @@ impl Installer {
                 payload.binary_filename,
                 self.local_bin.join(&payload.binary_filename).display()
             );
+            for mapping in &files {
+                println!(
+                    "[dry-run] Would install additional files from '{}' → {}",
+                    mapping.from,
+                    self.root_path(mapping.root)
+                        .join(&mapping.relative_path)
+                        .display()
+                );
+            }
             if checksum_sha256.is_none() {
                 println!(
                     "[dry-run] Warning: '{}' would be installed without SHA-256 verification",
@@ -568,6 +631,7 @@ impl Installer {
             return Ok(());
         }
         let installed_paths = self.commit_install(payload)?;
+        let installed_files = installed_paths.files.clone();
         let binary_audit = self.capture_binary_audit_baseline(
             &self.local_bin.join(&installed_paths.binary_filename),
         )?;
@@ -578,6 +642,13 @@ impl Installer {
             .iter()
             .find(|p| p.name == plugin.name)
             .cloned();
+        if let Some(previous) = &previous {
+            let removed = self
+                .remove_stale_installed_files(&previous.files, &installed_paths.files);
+            if removed > 0 {
+                println!("Removed {removed} file(s) from the previous version.");
+            }
+        }
         let pinned = previous.as_ref().map(|p| p.pinned).unwrap_or(false);
         state
             .installed
@@ -592,6 +663,7 @@ impl Installer {
             checksum_sha256,
             binary_checksum_sha256: Some(binary_checksum_sha256),
             man_pages: installed_paths.man_page_filenames,
+            files: installed_paths.files,
             installed_at_unix: Some(current_unix_timestamp()?),
             binary_mode: binary_audit.mode,
             binary_owner_uid: binary_audit.owner_uid,
@@ -635,6 +707,7 @@ impl Installer {
                 .join(&installed_paths.binary_filename)
                 .display()
         );
+        self.print_installed_file_summary(&installed_files);
         self.run_managed_completion_install(
             plugin,
             &installed_paths.binary_filename,
@@ -671,6 +744,15 @@ impl Installer {
                     self.local_man.join(filename).display()
                 );
             }
+            for file in &package.files {
+                match self.installed_file_path(file) {
+                    Some(path) => println!("[dry-run] Would remove {}", path.display()),
+                    None => warn!(
+                        "Skipping tracked file '{}' with unknown destination root '{}'",
+                        file.path, file.root
+                    ),
+                }
+            }
             println!("[dry-run] Would uninstall '{}'", plugin.name);
             self.run_managed_completion_uninstall(plugin, true)?;
             self.run_post_uninstall_hooks(plugin, &package.binary, true)?;
@@ -693,6 +775,31 @@ impl Installer {
                     println!("Removed {}", man_dest.display());
                 }
             }
+        }
+
+        let mut removed_files = 0usize;
+        for file in &package.files {
+            let Some(root) = FileRoot::from_key(&file.root) else {
+                warn!(
+                    "Skipping tracked file '{}' with unknown destination root '{}'",
+                    file.path, file.root
+                );
+                continue;
+            };
+            let path = self.root_path(root).join(&file.path);
+            if !path.exists() {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    removed_files += 1;
+                    prune_empty_parents(&path, self.root_path(root));
+                }
+                Err(err) => warn!("Failed to remove {}: {err}", path.display()),
+            }
+        }
+        if removed_files > 0 {
+            println!("Removed {removed_files} additional file(s)");
         }
 
         let mut state = self.load_state()?;
@@ -723,7 +830,7 @@ impl Installer {
         plugin: &Plugin,
         client: &GithubClient,
         request: BuildRequest<'_>,
-    ) -> Result<(InstallPayload, Option<String>)> {
+    ) -> Result<(InstallPayload, Option<String>, Vec<ResolvedPluginFile>)> {
         info!(
             "Downloading source archive for {}/{}@{}…",
             request.owner, request.repo, request.source_ref
@@ -746,6 +853,8 @@ impl Installer {
             std::env::consts::ARCH,
             request.target_override,
         );
+        let files = plugin
+            .resolve_files(request.template_tag, target.as_deref().unwrap_or_default())?;
         let binary_relative = expand_build_template(
             plugin,
             &plugin.binary,
@@ -789,8 +898,10 @@ impl Installer {
                     binary_filename,
                     binary_contents: Vec::new(),
                     man_pages: Vec::new(),
+                    files: Vec::new(),
                 },
                 target,
+                files,
             ));
         }
 
@@ -845,14 +956,77 @@ impl Installer {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let payload_files = self.read_build_files(plugin, &files, &repo_dir)?;
+
         Ok((
             InstallPayload {
                 binary_filename,
                 binary_contents,
                 man_pages,
+                files: payload_files,
             },
             target,
+            files,
         ))
+    }
+
+    /// Read the additional `files` payloads for a `--build` install from the
+    /// extracted source checkout.
+    fn read_build_files(
+        &self,
+        plugin: &Plugin,
+        mappings: &[ResolvedPluginFile],
+        repo_dir: &Path,
+    ) -> Result<Vec<PayloadFile>> {
+        let mut payload_files = Vec::new();
+        for mapping in mappings {
+            let source = repo_dir.join(&mapping.from);
+            let metadata = fs::metadata(&source).with_context(|| {
+                format!(
+                    "Expected '{}' for plugin '{}' at {}",
+                    mapping.from,
+                    plugin.name,
+                    source.display()
+                )
+            })?;
+
+            if metadata.is_dir() {
+                for entry in WalkDir::new(&source).follow_links(false) {
+                    let entry = entry.with_context(|| {
+                        format!(
+                            "Failed to walk additional files for plugin '{}'",
+                            plugin.name
+                        )
+                    })?;
+                    if !entry.file_type().is_file() {
+                        continue;
+                    }
+                    let relative =
+                        entry.path().strip_prefix(&source).with_context(|| {
+                            format!("Failed to resolve {}", entry.path().display())
+                        })?;
+                    payload_files.push(PayloadFile {
+                        root: mapping.root,
+                        relative_path: mapping.relative_path.join(relative),
+                        contents: fs::read(entry.path()).with_context(|| {
+                            format!("Failed to read {}", entry.path().display())
+                        })?,
+                        executable: mapping.executable
+                            || is_executable_file(entry.path()),
+                    });
+                }
+            } else {
+                payload_files.push(PayloadFile {
+                    root: mapping.root,
+                    relative_path: mapping.relative_path.clone(),
+                    contents: fs::read(&source).with_context(|| {
+                        format!("Failed to read {}", source.display())
+                    })?,
+                    executable: mapping.executable || is_executable_file(&source),
+                });
+            }
+        }
+        Ok(payload_files)
     }
 
     fn run_build_commands(
@@ -1017,7 +1191,74 @@ impl Installer {
     }
 
     fn commit_install(&self, payload: InstallPayload) -> Result<InstalledPaths> {
-        installer_archive::commit_install(&self.local_bin, &self.local_man, payload)
+        installer_archive::commit_install(self.roots(), payload)
+    }
+
+    /// Resolve the absolute destination of a tracked installed file.
+    fn installed_file_path(&self, file: &InstalledFile) -> Option<PathBuf> {
+        let root = FileRoot::from_key(&file.root)?;
+        Some(self.root_path(root).join(&file.path))
+    }
+
+    /// Remove files tracked by a previous install of the same package that are
+    /// not part of the new one, then prune directories left empty. Returns the
+    /// number of removed files.
+    fn remove_stale_installed_files(
+        &self,
+        previous: &[InstalledFile],
+        current: &[InstalledFile],
+    ) -> usize {
+        let mut removed = 0usize;
+        for file in previous {
+            if current.iter().any(|candidate| {
+                candidate.root == file.root && candidate.path == file.path
+            }) {
+                continue;
+            }
+            let Some(root) = FileRoot::from_key(&file.root) else {
+                warn!(
+                    "Skipping tracked file '{}' with unknown destination root '{}'",
+                    file.path, file.root
+                );
+                continue;
+            };
+            let path = self.root_path(root).join(&file.path);
+            if !path.exists() {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    debug!("Removed stale file {}", path.display());
+                    removed += 1;
+                    prune_empty_parents(&path, self.root_path(root));
+                }
+                Err(err) => {
+                    warn!("Failed to remove stale file {}: {err}", path.display())
+                }
+            }
+        }
+        removed
+    }
+
+    /// Print how many additional tracked files were installed per destination root.
+    fn print_installed_file_summary(&self, files: &[InstalledFile]) {
+        let mut counts: Vec<(FileRoot, usize)> = Vec::new();
+        for file in files {
+            let Some(root) = FileRoot::from_key(&file.root) else {
+                continue;
+            };
+            match counts.iter_mut().find(|(candidate, _)| *candidate == root) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((root, 1)),
+            }
+        }
+        for (root, count) in counts {
+            println!(
+                "  Installed {} file(s) → {}",
+                count,
+                self.root_path(root).display()
+            );
+        }
     }
 
     fn run_post_install_hooks(
@@ -1873,6 +2114,21 @@ fn is_executable_file(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         true
+    }
+}
+
+/// Remove empty directories left behind after deleting `path`, stopping at
+/// the destination root, which is never removed.
+fn prune_empty_parents(path: &Path, root: &Path) {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir == root || !dir.starts_with(root) {
+            break;
+        }
+        match fs::remove_dir(dir) {
+            Ok(()) => current = dir.parent(),
+            Err(_) => break,
+        }
     }
 }
 

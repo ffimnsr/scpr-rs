@@ -3,7 +3,7 @@ use super::{
     STATE_VERSION, State, StateFormat,
 };
 use crate::installer_archive::{
-    InstallPayload, parse_sha256_checksum_file, parse_sha256_digest,
+    InstallPayload, InstalledFile, parse_sha256_checksum_file, parse_sha256_digest,
 };
 use crate::plugin::{Plugin, PluginCompletions};
 use std::io::Cursor;
@@ -24,6 +24,8 @@ fn temp_installer() -> Installer {
     Installer {
         local_bin,
         local_man,
+        data_home: root.join("data"),
+        config_home: root.join("config"),
         state_file: state_dir.join("state.toml"),
         lock_stale_after_secs: 300,
     }
@@ -48,6 +50,7 @@ fn sample_plugin() -> Plugin {
         post_build: None,
         binary: "{name}-{version}-{target}/rg".to_string(),
         man_pages: Some(vec!["{name}-{version}-{target}/doc/rg.1".to_string()]),
+        files: Vec::new(),
         completions: None,
         post_install: None,
         post_uninstall: None,
@@ -110,6 +113,7 @@ fn sample_installed_package(name: &str, version: &str, binary: &str) -> Installe
         checksum_sha256: Some("a".repeat(64)),
         binary_checksum_sha256: Some("a".repeat(64)),
         man_pages: Vec::new(),
+        files: Vec::new(),
         installed_at_unix: Some(1),
         binary_mode: None,
         binary_owner_uid: None,
@@ -217,6 +221,7 @@ fn test_commit_install_writes_binary_and_man_page() {
         binary_filename: "rg".to_string(),
         binary_contents: b"binary".to_vec(),
         man_pages: vec![("rg.1".to_string(), b"manual".to_vec())],
+        files: Vec::new(),
     };
 
     let installed = installer.commit_install(payload).unwrap();
@@ -245,6 +250,7 @@ fn test_commit_install_cleans_orphaned_backup_files() {
         binary_filename: "rg".to_string(),
         binary_contents: b"binary".to_vec(),
         man_pages: Vec::new(),
+        files: Vec::new(),
     };
 
     let _installed = installer.commit_install(payload).unwrap();
@@ -477,6 +483,7 @@ fn test_audit_marks_packages_without_checksum_as_untracked() {
                 checksum_sha256: None,
                 binary_checksum_sha256: None,
                 man_pages: Vec::new(),
+                files: Vec::new(),
                 installed_at_unix: Some(1),
                 binary_mode: None,
                 binary_owner_uid: None,
@@ -516,6 +523,7 @@ fn test_audit_marks_legacy_archive_checksum_as_untracked() {
                 checksum_sha256: Some("a".repeat(64)),
                 binary_checksum_sha256: None,
                 man_pages: Vec::new(),
+                files: Vec::new(),
                 installed_at_unix: Some(1),
                 binary_mode: None,
                 binary_owner_uid: None,
@@ -863,4 +871,87 @@ fn test_clear_history_removes_matching_events() {
     let history = installer.history(None).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].package, "fd");
+}
+
+/// Build an installed-package record with tracked additional files.
+fn installed_package_with_files(
+    name: &str,
+    files: Vec<InstalledFile>,
+) -> InstalledPackage {
+    let mut package = sample_installed_package(name, "v1.0.0", name);
+    package.files = files;
+    package
+}
+
+#[test]
+fn test_remove_stale_installed_files_removes_only_missing_entries() {
+    let installer = temp_installer();
+    let config_home = installer.config_home.clone();
+    let stale_dir = config_home.join("ee").join("plugins").join("old");
+    std::fs::create_dir_all(&stale_dir).unwrap();
+    std::fs::write(stale_dir.join("old.bin"), b"old").unwrap();
+    let kept_dir = config_home.join("ee").join("plugins").join("keep");
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    std::fs::write(kept_dir.join("keep.bin"), b"keep").unwrap();
+
+    let stale = InstalledFile {
+        root: "config_home".to_string(),
+        path: "ee/plugins/old/old.bin".to_string(),
+        checksum_sha256: "a".repeat(64),
+    };
+    let kept = InstalledFile {
+        root: "config_home".to_string(),
+        path: "ee/plugins/keep/keep.bin".to_string(),
+        checksum_sha256: "b".repeat(64),
+    };
+
+    let removed = installer.remove_stale_installed_files(
+        &[stale.clone(), kept.clone()],
+        std::slice::from_ref(&kept),
+    );
+
+    assert_eq!(removed, 1);
+    assert!(!stale_dir.join("old.bin").exists());
+    assert!(!stale_dir.exists(), "empty directories are pruned");
+    assert!(kept_dir.join("keep.bin").exists());
+}
+
+#[tokio::test]
+async fn test_uninstall_removes_additional_files_and_prunes_empty_dirs() {
+    let installer = temp_installer();
+    let data_home = installer.data_home.clone();
+    let grammar_dir = data_home.join("ee").join("grammars");
+    std::fs::create_dir_all(&grammar_dir).unwrap();
+    std::fs::write(grammar_dir.join("rust.so"), b"grammar").unwrap();
+    let user_data = data_home.join("ee").join("user-note.txt");
+    std::fs::write(&user_data, b"keep me").unwrap();
+    std::fs::write(installer.local_bin_dir().join("ee"), b"binary").unwrap();
+
+    installer
+        .save_state(&State {
+            version: STATE_VERSION,
+            installed: vec![installed_package_with_files(
+                "ee",
+                vec![InstalledFile {
+                    root: "data_home".to_string(),
+                    path: "ee/grammars/rust.so".to_string(),
+                    checksum_sha256: "a".repeat(64),
+                }],
+            )],
+            history: Vec::new(),
+        })
+        .unwrap();
+
+    let plugin = Plugin {
+        name: "ee".to_string(),
+        ..sample_plugin()
+    };
+
+    installer.uninstall(&plugin, false).await.unwrap();
+
+    assert!(!grammar_dir.join("rust.so").exists());
+    assert!(!grammar_dir.exists(), "empty grammar dir should be pruned");
+    assert!(user_data.exists(), "unrelated files must be preserved");
+    assert!(!installer.local_bin_dir().join("ee").exists());
+    assert!(installer.list_installed().unwrap().is_empty());
 }

@@ -8,6 +8,21 @@ checksum_asset_pattern = "ee-{version}-{target}.tar.gz.sha256"
 binary = "ee-{version}-{target}/ee"
 man_pages = []
 
+# The release archive also ships the OpenRouter ACP agent binary, the
+# tree-sitter runtime, and the bundled xi-lsp plugin.
+[[plugin.files]]
+from = "ee-{version}-{target}/ee-openrouter-agent"
+to = "{install_dir}/ee-openrouter-agent"
+executable = true
+
+[[plugin.files]]
+from = "ee-{version}-{target}/share/ee"
+to = "{data_home}/ee"
+
+[[plugin.files]]
+from = "ee-{version}-{target}/share/ee/plugins"
+to = "{config_home}/ee/plugins"
+
 [plugin.completions]
 command = "{binary_path} do completions {shell}"
 

@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::ArgMatches;
-use futures_util::stream::{self, StreamExt};
 use std::path::Path;
 use std::process;
 use tracing_subscriber::EnvFilter;
@@ -14,6 +13,7 @@ mod plugin;
 mod plugin_scaffold;
 mod remote_index;
 mod settings;
+mod update_all;
 
 use cli_support::{
     build_doctor_checks, build_installed_package_rows, build_installed_status_rows,
@@ -28,7 +28,6 @@ use cli_support::{
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PKG_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
-const UPDATE_ALL_CONCURRENCY: usize = 4;
 const SELF_PACKAGE_NAME: &str = "scpr";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,133 +195,18 @@ async fn run() -> Result<()> {
                         "Use either `update <package> [--tag <tag>] [--target <triple>]` or `update --all`, not both"
                     );
                 }
-                let report = cli_support::collect_outdated_packages_report(
-                    &installer, &client, &dirs, None, true,
+                update_all::run(
+                    &installer,
+                    &client,
+                    &settings,
+                    update_all::UpdateAllOptions {
+                        dirs: &dirs,
+                        force_refresh,
+                        dry_run,
+                        build,
+                    },
                 )
                 .await?;
-                if !report.failures.is_empty() {
-                    let details = report
-                        .failures
-                        .iter()
-                        .map(|(name, err)| format!("{name}: {err}"))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    anyhow::bail!(
-                        "Failed to check updates for one or more packages:\n{}",
-                        details
-                    );
-                }
-                let outdated = report.outdated;
-                if outdated.is_empty() {
-                    println!("All installed packages are up to date.");
-                } else {
-                    let installer = installer.clone();
-                    let client = client.clone();
-                    let settings = settings.clone();
-                    let package_count = outdated.len();
-                    let mut updates = stream::iter(outdated.into_iter().map(|entry| {
-                        let installer = installer.clone();
-                        let client = client.clone();
-                        let settings = settings.clone();
-                        async move {
-                            let package_name = entry.name.clone();
-                            let package_dirs = match resolved_plugin_dirs_for_query(
-                                &settings,
-                                &client,
-                                None,
-                                &entry.name,
-                                force_refresh,
-                            )
-                            .await
-                            {
-                                Ok(dirs) => dirs,
-                                Err(err) => return Err((package_name, err)),
-                            };
-                            let plugin =
-                                match plugin::find_plugin(&entry.name, &package_dirs) {
-                                    Ok(plugin) => plugin,
-                                    Err(err) => return Err((package_name, err)),
-                                };
-                            match installer
-                                .install(
-                                    &plugin,
-                                    &client,
-                                    installer::InstallOptions {
-                                        tag: Some(&entry.latest_version),
-                                        target_override: None,
-                                        dry_run,
-                                        force: false,
-                                        build,
-                                    },
-                                )
-                                .await
-                            {
-                                Ok(()) => Ok(entry.name),
-                                Err(err) => Err((entry.name, err)),
-                            }
-                        }
-                    }))
-                    .buffer_unordered(UPDATE_ALL_CONCURRENCY);
-
-                    let mut succeeded = Vec::new();
-                    let mut failed = Vec::new();
-                    let mut completed = 0usize;
-                    while let Some(result) = updates.next().await {
-                        completed += 1;
-                        match result {
-                            Ok(name) => {
-                                println!(
-                                    "Progress: {completed}/{package_count} complete ({name}: updated)"
-                                );
-                                succeeded.push(name);
-                            }
-                            Err((name, err)) => {
-                                eprintln!(
-                                    "Progress: {completed}/{package_count} complete ({name}: failed)"
-                                );
-                                failed.push((name, err));
-                            }
-                        }
-                    }
-
-                    if !failed.is_empty() {
-                        eprintln!(
-                            "One or more packages failed during `update --all`. Successful updates were kept."
-                        );
-                        for (name, err) in &failed {
-                            eprintln!("  {name}: {err}");
-                        }
-                    }
-
-                    println!(
-                        "Update summary: {} succeeded, {} failed, {} total.",
-                        succeeded.len(),
-                        failed.len(),
-                        package_count
-                    );
-                    if !succeeded.is_empty() {
-                        println!("Succeeded: {}", succeeded.join(", "));
-                    }
-                    if !failed.is_empty() {
-                        println!(
-                            "Failed: {}",
-                            failed
-                                .iter()
-                                .map(|(name, _)| name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        );
-                        let details = failed
-                            .into_iter()
-                            .map(|(name, err)| format!("{name}: {err}"))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        anyhow::bail!(
-                            "One or more package updates failed during `update --all`:\n{}",
-                            details
-                        );
-                    }
-                }
             } else {
                 let package = package.ok_or_else(|| {
                     anyhow::anyhow!(

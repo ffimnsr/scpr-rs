@@ -344,6 +344,7 @@ Configuration sources:
 - `--plugins-dir /path/to/plugins` for one-off overrides
 - `SCPR_PLUGINS_DIR` with standard path separators for extra plugin directories
 - `SCPR_BIN_DIR` to override the binary install directory
+- `SCPR_DATA_HOME` and `SCPR_CONFIG_HOME` to override the XDG data and config roots used by plugin `files` destinations
 - `~/.config/scpr/config.toml` for persistent settings such as `install_dir`, `man_dir`, `plugin_dirs`, `index_ttl_secs`, and `lock_stale_after_secs`
 
 Remote index notes:
@@ -522,6 +523,33 @@ Optional install customization:
 - `post_install` runs shell commands after installation with `{binary_path}`, `{binary_name}`, and `{plugin}` placeholders
 - `post_uninstall` runs shell commands after uninstall for non-completion cleanup that falls outside the managed completion flow
 
+Optional additional files:
+
+`[[plugin.files]]` entries install extra binaries or asset trees from the same
+verified release archive (or source checkout with `--build`), next to the main
+`binary` and `man_pages`:
+
+```toml
+[[plugin.files]]
+from = "ee-{version}-{target}/ee-openrouter-agent"
+to = "{install_dir}/ee-openrouter-agent"
+executable = true
+
+[[plugin.files]]
+from = "ee-{version}-{target}/share/ee"
+to = "{data_home}/ee"
+```
+
+- `from` is a path inside the archive. When it names a directory, the whole tree is installed
+- `to` must start with `{install_dir}`, `{data_home}`, or `{config_home}`:
+  - `{install_dir}` resolves to the scpr binary directory (`~/.local/bin`)
+  - `{data_home}` resolves to the XDG data home (`~/.local/share`, override with `SCPR_DATA_HOME`)
+  - `{config_home}` resolves to the XDG config home (`~/.config`, override with `SCPR_CONFIG_HOME`)
+- declared `files.from` paths must exist in the archive, otherwise the install fails
+- paths in the archive always keep their executable bit, and `executable = true` forces it
+- every installed file is recorded in state, so `update` removes files dropped by a newer release and `uninstall` deletes exactly what was installed, pruning empty directories it created but leaving unrelated files alone
+- entries are validated: `from` must stay inside the archive and `to` must stay inside its destination root, so plugin files cannot write outside these roots
+
 Optional source-build customization:
 
 - `build_branch` chooses the source ref for `--build`; it can be a branch name such as `main` or a tag name
@@ -546,7 +574,7 @@ It can also verify optional detached signatures when a plugin defines:
 
 It also:
 
-- stages binary/man page replacements before swapping them into place
+- stages binary/man page/additional file replacements before swapping them into place
 - uses a lock file to reduce concurrent state-write races
 - keeps package metadata and movement history in local state
 
