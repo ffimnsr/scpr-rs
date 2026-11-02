@@ -1,0 +1,14 @@
+[plugin]
+name = "mdbook"
+alias = ["mdbook"]
+description = "A utility to create modern online books from Markdown files"
+location = "github:rust-lang/mdBook"
+asset_pattern = "mdbook-v{version}-{target}.tar.gz"
+binary = "mdbook"
+man_pages = []
+
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"

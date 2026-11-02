@@ -629,6 +629,7 @@ mod tests {
         assert!(plugins.iter().any(|plugin| plugin.name == "ripgrep"));
         assert!(plugins.iter().any(|plugin| plugin.name == "fd"));
         assert!(plugins.iter().any(|plugin| plugin.name == "jq"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "mdbook"));
         assert!(plugins.iter().any(|plugin| plugin.name == "scpr"));
         assert!(plugins.iter().any(|plugin| plugin.name == "sqlx"));
         assert!(plugins.iter().any(|plugin| plugin.name == "tw-dl"));

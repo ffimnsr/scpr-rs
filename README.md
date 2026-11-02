@@ -39,6 +39,7 @@ Bundled plugins currently include:
 - `lsd`
 - `mk`
 - `midas`
+- `mdbook`
 - `sqlx` via `--build`
 
 ## Quick Start
