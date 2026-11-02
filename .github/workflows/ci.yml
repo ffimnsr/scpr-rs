@@ -35,6 +35,24 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  plugins:
+    name: Plugin Schema and Definitions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate plugin TOMLs and schema
+        run: |
+          scripts/validate-plugins.sh
+          scripts/validate-plugins.sh --check-schema --no-build
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
