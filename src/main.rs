@@ -305,6 +305,16 @@ async fn run() -> Result<()> {
                 let plugin = find_plugin_with_suggestion(package, &dirs)?;
                 print_plugin_info(&plugin);
             }
+            Some(("schema", sub)) => {
+                let schema = plugin::schema_json()?;
+                match sub.get_one::<String>("output") {
+                    Some(path) => {
+                        std::fs::write(path, schema)?;
+                        println!("Wrote plugin schema to {path}");
+                    }
+                    None => print!("{schema}"),
+                }
+            }
             Some(("validate", sub)) => {
                 let path = sub.get_one::<String>("path").unwrap();
                 let report = validate_plugin_file(path)?;

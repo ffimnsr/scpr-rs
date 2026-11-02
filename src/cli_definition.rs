@@ -188,6 +188,17 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
                         .arg(plugins_dir_arg.clone()),
                 )
                 .subcommand(
+                    Command::new("schema")
+                        .about("Print the JSON Schema for plugin TOML files")
+                        .arg(
+                            Arg::new("output")
+                                .long("output")
+                                .short('o')
+                                .action(ArgAction::Set)
+                                .help("Write the schema to a file instead of stdout"),
+                        ),
+                )
+                .subcommand(
                     Command::new("validate")
                         .about("Validate a local plugin TOML file")
                         .arg(

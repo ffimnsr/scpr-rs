@@ -1,0 +1,61 @@
+#:schema plugin.schema.json
+
+# Minimal scpr plugin definition.
+#
+# Copy this file to `plugins/<name>.toml` and adjust the values for the
+# upstream project. Validate it with:
+#
+#   scpr plugins validate plugins/<name>.toml
+#   scpr plugins test plugins/<name>.toml
+#
+# Template placeholders: {name}, {version}, {tag}, {target}.
+# `{version}` is the release tag with a leading `v` stripped.
+[plugin]
+name = "mytool"
+alias = ["mytool", "mt"]
+description = "What this tool does"
+location = "github:owner/repo"
+
+# Release asset to download. The filename must match the GitHub release asset
+# exactly after placeholders are expanded.
+asset_pattern = "mytool-v{version}-{target}.tar.gz"
+
+# Optional. Only needed when GitHub does not expose a SHA-256 digest for the
+# release asset. The file must contain the checksum for the downloaded asset.
+# checksum_asset_pattern = "mytool-v{version}-{target}.tar.gz.sha256"
+
+# Path to the executable inside the archive. Use `"mytool"` when the archive
+# contains the binary at its root.
+binary = "mytool-v{version}-{target}/mytool"
+
+# Optional man pages inside the archive.
+# man_pages = ["mytool-v{version}-{target}/mytool.1"]
+
+# Optional: install extra files or directory trees from the archive.
+# [[plugin.files]]
+# from = "mytool-v{version}-{target}/share/mytool"
+# to = "{data_home}/mytool"
+# executable = false
+
+# Optional: managed shell completion command.
+# [plugin.completions]
+# command = "{binary_path} completions {shell}"
+
+# Optional lifecycle hooks. Supported placeholders include {install_dir},
+# {data_home}, {config_home}, and {binary_path}.
+# post_install = []
+# post_uninstall = []
+# cleanup = []
+
+# To build from source instead of downloading a release, omit asset_pattern
+# and use a build script. `--build` is required for this mode.
+# build_branch = "main"
+# build_script = ["cargo build --release"]
+# binary = "target/release/mytool"
+
+# Map the host platform to the target triple used in release asset names.
+[plugin.targets]
+"linux-x86_64" = "x86_64-unknown-linux-musl"
+"linux-aarch64" = "aarch64-unknown-linux-musl"
+"macos-x86_64" = "x86_64-apple-darwin"
+"macos-aarch64" = "aarch64-apple-darwin"

@@ -23,6 +23,10 @@ tasks:
     commands:
       - cargo test --all-features
     description: Run all tests with all features enabled.
+  validate-plugins:
+    commands:
+      - scripts/validate-plugins.sh
+    description: Validate bundled plugin TOML files.
   build:
     commands:
       - cargo build --release

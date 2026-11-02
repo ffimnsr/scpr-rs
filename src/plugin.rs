@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, anyhow};
+use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,7 +34,7 @@ static EMITTED_PLUGIN_WARNINGS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new
 /// - `{version}` — release version with leading `v` stripped (e.g. "14.1.0")
 /// - `{tag}`     — release tag as returned by GitHub (e.g. "14.1.0" or "v1.2.0")
 /// - `{target}`  — platform target triple resolved from `[plugin.targets]`
-#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq, JsonSchema)]
 pub struct PluginCompletions {
     /// Shell command template that prints completion script content to stdout.
     ///
@@ -40,7 +42,7 @@ pub struct PluginCompletions {
     pub command: String,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
 pub struct PluginFile {
     /// Path inside the release archive (or the source checkout when `--build`
     /// is used). When it names a directory, the whole tree is installed.
@@ -97,10 +99,13 @@ pub struct ResolvedPluginFile {
     pub executable: bool,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Default, JsonSchema)]
 pub struct Plugin {
+    /// Primary plugin identifier used by install, update, and pin commands.
     pub name: String,
+    /// Alternative names accepted by plugin lookup.
     pub alias: Vec<String>,
+    /// Human-readable summary shown by plugin listing and info commands.
     pub description: Option<String>,
     /// GitHub location in the form `github:<owner>/<repo>`.
     pub location: String,
@@ -276,8 +281,9 @@ pub(crate) fn path_has_traversal(path: &Path) -> bool {
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct PluginContainer {
+    /// Plugin metadata and install instructions.
     plugin: Plugin,
 }
 
@@ -292,6 +298,159 @@ pub fn parse(path: &str) -> Result<Plugin> {
         .with_context(|| format!("Failed to parse plugin TOML: {path}"))?;
 
     Ok(container.plugin)
+}
+
+/// Generate the JSON Schema for plugin TOML files.
+///
+/// The schema is derived from the Rust types so it stays in sync with the
+/// parser. Semantic checks that cannot be expressed directly in the derived
+/// schema (patterns, conditional requirements, cross-field rules) are still
+/// enforced by `scpr plugins validate`.
+pub fn schema_json() -> Result<String> {
+    let mut schema = serde_json::to_value(schemars::schema_for!(PluginContainer))
+        .context("Failed to serialize plugin JSON schema")?;
+
+    if let Some(object) = schema.as_object_mut() {
+        object.insert(
+            "$id".to_string(),
+            Value::String(
+                "https://raw.githubusercontent.com/ffimnsr/scpr-rs/master/schemas/plugin.schema.json"
+                    .to_string(),
+            ),
+        );
+        object.insert(
+            "title".to_string(),
+            Value::String("scpr plugin definition".to_string()),
+        );
+        object.insert(
+            "$comment".to_string(),
+            Value::String(
+                "Template placeholders supported by patterns, paths, and commands: {name}, {version}, {tag}, {target}. Hook commands also support {install_dir}, {data_home}, {config_home}, {binary_path}, and {shell}."
+                    .to_string(),
+            ),
+        );
+    }
+
+    apply_schema_constraints(&mut schema);
+
+    let mut json = serde_json::to_string_pretty(&schema)
+        .context("Failed to format plugin JSON schema")?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// Add validation constraints that cannot be derived from the Rust types.
+fn apply_schema_constraints(schema: &mut Value) {
+    let Some(root) = schema.as_object_mut() else {
+        return;
+    };
+    root.insert("additionalProperties".to_string(), Value::Bool(false));
+
+    let Some(definitions) = root.get_mut("$defs").and_then(Value::as_object_mut) else {
+        return;
+    };
+
+    if let Some(plugin) = definitions.get_mut("Plugin").and_then(Value::as_object_mut) {
+        plugin.insert("additionalProperties".to_string(), Value::Bool(false));
+        add_min_length(plugin, "name", 1);
+        add_min_length(plugin, "binary", 1);
+        add_pattern(
+            plugin,
+            "location",
+            "^github:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+        );
+        add_enum(plugin, "signature_format", &["gpg", "minisign"]);
+        add_items_min_length(plugin, "alias", 1);
+        add_additional_properties_min_length(plugin, "targets", 1);
+        plugin.insert(
+            "allOf".to_string(),
+            json!([
+                {
+                    "if": { "not": { "required": ["build_script"] } },
+                    "then": {
+                        "required": ["asset_pattern"],
+                        "properties": { "asset_pattern": { "minLength": 1 } }
+                    }
+                },
+                {
+                    "if": { "required": ["build_branch"] },
+                    "then": { "required": ["build_script"] }
+                },
+                {
+                    "if": { "required": ["signature_asset_pattern"] },
+                    "then": { "required": ["signature_format"] }
+                }
+            ]),
+        );
+    }
+
+    if let Some(file) = definitions
+        .get_mut("PluginFile")
+        .and_then(Value::as_object_mut)
+    {
+        file.insert("additionalProperties".to_string(), Value::Bool(false));
+        add_min_length(file, "from", 1);
+        add_pattern(file, "to", "^\\{(install_dir|data_home|config_home)\\}/.+");
+    }
+
+    if let Some(completions) = definitions
+        .get_mut("PluginCompletions")
+        .and_then(Value::as_object_mut)
+    {
+        completions.insert("additionalProperties".to_string(), Value::Bool(false));
+        add_min_length(completions, "command", 1);
+    }
+}
+
+fn property_mut<'a>(
+    definition: &'a mut Map<String, Value>,
+    name: &str,
+) -> Option<&'a mut Map<String, Value>> {
+    definition
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)?
+        .get_mut(name)
+        .and_then(Value::as_object_mut)
+}
+
+fn add_min_length(definition: &mut Map<String, Value>, name: &str, min: u64) {
+    if let Some(property) = property_mut(definition, name) {
+        property.insert("minLength".to_string(), Value::from(min));
+    }
+}
+
+fn add_pattern(definition: &mut Map<String, Value>, name: &str, pattern: &str) {
+    if let Some(property) = property_mut(definition, name) {
+        property.insert("pattern".to_string(), Value::String(pattern.to_string()));
+    }
+}
+
+fn add_enum(definition: &mut Map<String, Value>, name: &str, values: &[&str]) {
+    if let Some(property) = property_mut(definition, name) {
+        property.insert("enum".to_string(), json!(values));
+    }
+}
+
+fn add_items_min_length(definition: &mut Map<String, Value>, name: &str, min: u64) {
+    if let Some(items) = property_mut(definition, name)
+        .and_then(|property| property.get_mut("items"))
+        .and_then(Value::as_object_mut)
+    {
+        items.insert("minLength".to_string(), Value::from(min));
+    }
+}
+
+fn add_additional_properties_min_length(
+    definition: &mut Map<String, Value>,
+    name: &str,
+    min: u64,
+) {
+    if let Some(additional) = property_mut(definition, name)
+        .and_then(|property| property.get_mut("additionalProperties"))
+        .and_then(Value::as_object_mut)
+    {
+        additional.insert("minLength".to_string(), Value::from(min));
+    }
 }
 
 fn is_not_hidden(entry: &DirEntry) -> bool {
@@ -633,6 +792,16 @@ mod tests {
         assert!(plugins.iter().any(|plugin| plugin.name == "scpr"));
         assert!(plugins.iter().any(|plugin| plugin.name == "sqlx"));
         assert!(plugins.iter().any(|plugin| plugin.name == "tw-dl"));
+    }
+
+    #[test]
+    fn test_plugin_schema_matches_committed_file() {
+        let generated = schema_json().unwrap();
+        let committed = fs::read_to_string("schemas/plugin.schema.json").unwrap();
+        assert_eq!(
+            generated, committed,
+            "schemas/plugin.schema.json is out of date; run `cargo run -- plugins schema --output schemas/plugin.schema.json`"
+        );
     }
 
     #[test]

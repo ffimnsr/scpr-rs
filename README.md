@@ -309,6 +309,27 @@ scpr plugins new owner/repo --output ./plugins/yourtool.toml
 
 `plugins new` inspects the latest GitHub release and writes a starter TOML. It is intentionally best-effort, so review the generated asset pattern, binary path, checksum source, and target mappings before committing it.
 
+Plugin definitions follow the schema in [`schemas/plugin.schema.json`](schemas/plugin.schema.json). A commented starter file is available at [`schemas/plugin.template.toml`](schemas/plugin.template.toml), and the field reference is in [`schemas/README.md`](schemas/README.md). Editors with TOML schema support can validate a plugin by adding this line at the top of the file:
+
+```toml
+#:schema ../schemas/plugin.schema.json
+```
+
+Print the generated schema or refresh the committed copy:
+
+```bash
+scpr plugins schema
+scpr plugins schema --output schemas/plugin.schema.json
+```
+
+Validate a single plugin file or the whole bundled directory:
+
+```bash
+scripts/validate-plugins.sh plugins/mdbook.toml
+scripts/validate-plugins.sh plugins
+scripts/validate-plugins.sh --check-schema
+```
+
 If an upstream publishes no GitHub asset digest and no checksum file, a plugin can opt in to an unverified install path with `allow_insecure_no_checksum = true`. This is off by default and should only be used when you accept that `audit` cannot verify the installed binary later.
 
 Manage remote GitHub-backed plugin indexes:

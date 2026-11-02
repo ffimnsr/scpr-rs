@@ -1,0 +1,284 @@
+{
+  "$comment": "Template placeholders supported by patterns, paths, and commands: {name}, {version}, {tag}, {target}. Hook commands also support {install_dir}, {data_home}, {config_home}, {binary_path}, and {shell}.",
+  "$defs": {
+    "Plugin": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "not": {
+              "required": [
+                "build_script"
+              ]
+            }
+          },
+          "then": {
+            "properties": {
+              "asset_pattern": {
+                "minLength": 1
+              }
+            },
+            "required": [
+              "asset_pattern"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "build_branch"
+            ]
+          },
+          "then": {
+            "required": [
+              "build_script"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "signature_asset_pattern"
+            ]
+          },
+          "then": {
+            "required": [
+              "signature_format"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "alias": {
+          "description": "Alternative names accepted by plugin lookup.",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allow_insecure_no_checksum": {
+          "default": false,
+          "description": "Explicit opt-in for releases that ship no SHA-256 metadata at all.",
+          "type": "boolean"
+        },
+        "asset_pattern": {
+          "default": "",
+          "description": "Asset filename pattern with template placeholders.",
+          "type": "string"
+        },
+        "binary": {
+          "description": "Path to the binary within the extracted archive.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "build_branch": {
+          "description": "Optional source ref for `--build`; accepts a branch name or tag.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "build_script": {
+          "description": "Optional commands to build the project from source when `--build` is used.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "checksum_asset_pattern": {
+          "description": "Optional checksum asset filename pattern used when release metadata\ndoes not expose an asset digest directly.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cleanup": {
+          "description": "Optional commands to remove user-generated data after confirmation.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "completions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PluginCompletions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional managed shell completion metadata."
+        },
+        "description": {
+          "description": "Human-readable summary shown by plugin listing and info commands.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "description": "Additional files or directory trees to install from the archive (or\nsource checkout when `--build` is used), beyond `binary`/`man_pages`.",
+          "items": {
+            "$ref": "#/$defs/PluginFile"
+          },
+          "type": "array"
+        },
+        "location": {
+          "description": "GitHub location in the form `github:<owner>/<repo>`.",
+          "pattern": "^github:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "type": "string"
+        },
+        "man_pages": {
+          "description": "Paths to man pages within the extracted archive.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Primary plugin identifier used by install, update, and pin commands.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "post_build": {
+          "description": "Optional commands to run after source builds complete.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "post_install": {
+          "description": "Optional commands to run after installation.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "post_uninstall": {
+          "description": "Optional commands to run after uninstalling tracked files.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "signature_asset_pattern": {
+          "description": "Optional signature asset filename pattern for release verification.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signature_format": {
+          "description": "Signature verification backend: `gpg` or `minisign`.",
+          "enum": [
+            "gpg",
+            "minisign"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signature_key": {
+          "description": "Optional key material or key identifier for signature verification.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "targets": {
+          "additionalProperties": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "description": "Map from `<os>-<arch>` key to the target triple used in release asset names.",
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "alias",
+        "location",
+        "binary"
+      ],
+      "type": "object"
+    },
+    "PluginCompletions": {
+      "additionalProperties": false,
+      "description": "Plugin definition loaded from a TOML file.\n\nExample plugin file (`plugins/ripgrep.toml`):\n```toml\n[plugin]\nname = \"ripgrep\"\nalias = [\"rg\", \"ripgrep\"]\ndescription = \"A fast line-oriented search tool\"\nlocation = \"github:BurntSushi/ripgrep\"\nasset_pattern = \"{name}-{version}-{target}.tar.gz\"\nbinary = \"{name}-{version}-{target}/rg\"\nman_pages = [\"{name}-{version}-{target}/doc/rg.1\"]\n\n[plugin.targets]\n\"linux-x86_64\" = \"x86_64-unknown-linux-musl\"\n\"macos-aarch64\" = \"aarch64-apple-darwin\"\n```\n\nTemplate placeholders supported in `asset_pattern`, `binary`, and `man_pages`:\n- `{name}`    — plugin name (e.g. \"ripgrep\")\n- `{version}` — release version with leading `v` stripped (e.g. \"14.1.0\")\n- `{tag}`     — release tag as returned by GitHub (e.g. \"14.1.0\" or \"v1.2.0\")\n- `{target}`  — platform target triple resolved from `[plugin.targets]`",
+      "properties": {
+        "command": {
+          "description": "Shell command template that prints completion script content to stdout.\n\nSupported placeholders match hook templates plus `{shell}`.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "PluginFile": {
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "default": false,
+          "description": "Force the executable bit on the installed files.",
+          "type": "boolean"
+        },
+        "from": {
+          "description": "Path inside the release archive (or the source checkout when `--build`\nis used). When it names a directory, the whole tree is installed.\nSupports the standard template placeholders.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "to": {
+          "description": "Destination path. Must start with `{install_dir}`, `{data_home}`, or\n`{config_home}` followed by a relative path. Supports the standard\ntemplate placeholders.",
+          "pattern": "^\\{(install_dir|data_home|config_home)\\}/.+",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/ffimnsr/scpr-rs/master/schemas/plugin.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "plugin": {
+      "$ref": "#/$defs/Plugin",
+      "description": "Plugin metadata and install instructions."
+    }
+  },
+  "required": [
+    "plugin"
+  ],
+  "title": "scpr plugin definition",
+  "type": "object"
+}
