@@ -17,6 +17,11 @@ pub fn build_plugin_scaffold(
 ) -> Result<PluginScaffold> {
     let (owner, repo_name) = split_repo(repo)?;
     let plugin_name = sanitize_plugin_name(repo_name);
+    if !release.assets_known {
+        return Err(anyhow!(
+            "Could not inspect release assets for {owner}/{repo_name} because the GitHub API was unavailable. Set GITHUB_TOKEN or GH_TOKEN and try again."
+        ));
+    }
     let description = metadata.description.as_deref().unwrap_or("");
     let assets: Vec<&ReleaseAsset> = release
         .assets
@@ -295,6 +300,7 @@ mod tests {
                     digest: None,
                 })
                 .collect(),
+            assets_known: true,
         }
     }
 
@@ -386,5 +392,19 @@ mod tests {
                 .contents
                 .contains("checksum_asset_pattern = \"sha256sum.txt\"")
         );
+    }
+
+    #[test]
+    fn test_build_plugin_scaffold_rejects_release_without_api_assets() {
+        let release = Release {
+            tag_name: "v1.2.3".to_string(),
+            assets: Vec::new(),
+            assets_known: false,
+        };
+
+        let error =
+            build_plugin_scaffold("acme/tool", &sample_metadata(), &release).unwrap_err();
+
+        assert!(error.to_string().contains("GITHUB_TOKEN or GH_TOKEN"));
     }
 }

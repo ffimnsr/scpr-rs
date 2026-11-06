@@ -486,7 +486,7 @@ impl Installer {
         } else {
             let release = match options.tag {
                 Some(tag) => client.get_release_by_tag(owner, repo, tag).await?,
-                None => client.get_latest_release(owner, repo).await?,
+                None => client.get_latest_release_fresh(owner, repo).await?,
             };
             let tag = release.tag_name;
             info!("Using release: {tag}");
@@ -525,13 +525,20 @@ impl Installer {
             debug!("Asset: {asset_name}");
             debug!("Binary path in archive: {binary_path}");
 
-            let asset = release
-                .assets
+            let assets = if release.assets_known {
+                release.assets
+            } else {
+                warn!(
+                    "Release {tag} was resolved without the GitHub API; asset names were inferred from the plugin and will not be validated before download"
+                );
+                synthesize_release_assets(plugin, owner, repo, &tag, &target, &asset_name)
+            };
+
+            let asset = assets
                 .iter()
                 .find(|candidate| candidate.name == asset_name)
                 .ok_or_else(|| {
-                    let available = release
-                        .assets
+                    let available = assets
                         .iter()
                         .map(|candidate| candidate.name.as_str())
                         .collect::<Vec<_>>()
@@ -551,23 +558,10 @@ impl Installer {
                 .download_asset(&asset.browser_download_url, asset.size)
                 .await?;
             let checksum_sha256 = self
-                .resolve_expected_sha256(
-                    plugin,
-                    client,
-                    &release.assets,
-                    asset,
-                    &tag,
-                    &target,
-                )
+                .resolve_expected_sha256(plugin, client, &assets, asset, &tag, &target)
                 .await?;
             installer_verify::verify_signature_if_configured(
-                plugin,
-                client,
-                &release.assets,
-                asset,
-                &data,
-                &tag,
-                &target,
+                plugin, client, &assets, asset, &data, &tag, &target,
             )
             .await?;
             if let Some(expected_sha256) = checksum_sha256.as_deref() {
@@ -2025,6 +2019,44 @@ fn resolve_optional_target(
         .or_else(|| plugin.resolve_target(os, arch))
 }
 
+/// Reconstruct the assets a plugin needs when release metadata came from the
+/// public releases page instead of the GitHub API. GitHub's download URLs are
+/// deterministic, so the plugin patterns are sufficient for public repos.
+fn synthesize_release_assets(
+    plugin: &Plugin,
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    target: &str,
+    asset_name: &str,
+) -> Vec<ReleaseAsset> {
+    let mut names = vec![asset_name.to_string()];
+    for pattern in [
+        plugin.checksum_asset_pattern.as_deref(),
+        plugin.signature_asset_pattern.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let name = plugin.expand_template(pattern, tag, target);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+
+    names
+        .into_iter()
+        .map(|name| ReleaseAsset {
+            browser_download_url: format!(
+                "https://github.com/{owner}/{repo}/releases/download/{tag}/{name}"
+            ),
+            name,
+            size: 0,
+            digest: None,
+        })
+        .collect()
+}
+
 async fn resolve_build_ref(
     plugin: &Plugin,
     client: &GithubClient,
@@ -2041,7 +2073,7 @@ async fn resolve_build_ref(
         });
     }
 
-    let release = client.get_latest_release(owner, repo).await?;
+    let release = client.get_latest_release_fresh(owner, repo).await?;
     Ok(BuildRefResolution {
         source_ref: release.tag_name.clone(),
         template_tag: release.tag_name.clone(),

@@ -13,6 +13,7 @@ struct FileSettings {
     plugin_dirs: Vec<String>,
     index_ttl_secs: Option<u64>,
     lock_stale_after_secs: Option<u64>,
+    github_cache_ttl_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,10 +22,12 @@ pub struct AppSettings {
     man_dir: PathBuf,
     data_home: PathBuf,
     config_home: PathBuf,
+    cache_home: PathBuf,
     data_dir: PathBuf,
     plugin_dirs: Vec<String>,
     index_ttl_secs: Option<u64>,
     lock_stale_after_secs: u64,
+    github_cache_ttl_secs: u64,
 }
 
 impl AppSettings {
@@ -53,6 +56,17 @@ impl AppSettings {
         let config_file = config_home.join("scpr").join("config.toml");
         let file_settings = load_file_settings(&config_file)?;
 
+        let cache_home = env::var_os("SCPR_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                resolve_xdg_dir(
+                    env::var_os("XDG_CACHE_HOME").map(PathBuf::from),
+                    dirs::cache_dir(),
+                    &home,
+                    ".cache",
+                )
+            });
+
         let install_dir = env::var_os("SCPR_BIN_DIR")
             .map(PathBuf::from)
             .or(file_settings.install_dir)
@@ -77,6 +91,7 @@ impl AppSettings {
             man_dir,
             data_home,
             config_home,
+            cache_home,
             data_dir,
             plugin_dirs,
             index_ttl_secs: Some(file_settings.index_ttl_secs.unwrap_or(600)),
@@ -84,6 +99,11 @@ impl AppSettings {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .or(file_settings.lock_stale_after_secs)
+                .unwrap_or(300),
+            github_cache_ttl_secs: env::var("SCPR_GITHUB_CACHE_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .or(file_settings.github_cache_ttl_secs)
                 .unwrap_or(300),
         })
     }
@@ -116,6 +136,18 @@ impl AppSettings {
 
     pub fn lock_stale_after_secs(&self) -> u64 {
         self.lock_stale_after_secs
+    }
+
+    /// Cache GitHub release metadata under the XDG cache directory.
+    pub fn github_cache_dir(&self) -> PathBuf {
+        self.cache_home.join("scpr").join("github-cache")
+    }
+
+    /// How long cached GitHub release metadata may be reused without a
+    /// conditional request. `0` means always revalidate (ETags still avoid
+    /// consuming quota on `304 Not Modified` responses).
+    pub fn github_cache_ttl_secs(&self) -> u64 {
+        self.github_cache_ttl_secs
     }
 
     pub fn default_plugin_dirs(&self) -> Vec<String> {
@@ -162,6 +194,7 @@ mod tests {
         assert!(settings.plugin_dirs.is_empty());
         assert!(settings.index_ttl_secs.is_none());
         assert!(settings.lock_stale_after_secs.is_none());
+        assert!(settings.github_cache_ttl_secs.is_none());
     }
 
     #[test]

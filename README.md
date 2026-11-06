@@ -367,8 +367,8 @@ Configuration sources:
 - `--plugins-dir /path/to/plugins` for one-off overrides
 - `SCPR_PLUGINS_DIR` with standard path separators for extra plugin directories
 - `SCPR_BIN_DIR` to override the binary install directory
-- `SCPR_DATA_HOME` and `SCPR_CONFIG_HOME` to override the XDG data and config roots (these also relocate scpr's own state file and config directory, and are used for plugin `files` destinations)
-- `~/.config/scpr/config.toml` for persistent settings such as `install_dir`, `man_dir`, `plugin_dirs`, `index_ttl_secs`, and `lock_stale_after_secs`
+- `SCPR_DATA_HOME`, `SCPR_CONFIG_HOME`, and `SCPR_CACHE_HOME` to override the XDG data, config, and cache roots (these also relocate scpr's own state file, config directory, and release cache, and are used for plugin `files` destinations)
+- `~/.config/scpr/config.toml` for persistent settings such as `install_dir`, `man_dir`, `plugin_dirs`, `index_ttl_secs`, `lock_stale_after_secs`, and `github_cache_ttl_secs`
 
 Remote index notes:
 
@@ -446,7 +446,19 @@ Check local setup:
 scpr doctor
 ```
 
-`doctor` reports the problem and suggests a fix when it finds issues like a missing `PATH` entry, missing man-page search path, unreadable plugin directories, or recorded files that have drifted from local state.
+`doctor` reports the problem and suggests a fix when it finds issues like a missing `PATH` entry, missing man-page search path, unreadable plugin directories, or recorded files that have drifted from local state. It also reports the remaining GitHub API quota and when it resets.
+
+#### GitHub API authentication
+
+Unauthenticated GitHub API requests are limited to 60 per hour per IP, which `update --all` and repeated installs can exhaust quickly. Set a token to raise the limit to 5,000 requests per hour:
+
+```bash
+export GITHUB_TOKEN="$(gh auth token)"   # or a fine-grained personal access token
+```
+
+`GH_TOKEN` is also honored when `GITHUB_TOKEN` is not set. The token is used for API metadata requests and for downloading assets from private repositories. Tokens are never written to `scpr`'s config or state files.
+
+`scpr` caches GitHub release metadata under `${XDG_CACHE_HOME:-~/.cache}/scpr/github-cache`. Cached entries are reused for 5 minutes by default and revalidated with ETags afterwards, so unchanged releases cost no API quota. `scpr install` always revalidates the latest release instead of trusting a warm cache, so a new release is picked up immediately. Override the TTL with `SCPR_GITHUB_CACHE_TTL_SECS` or `github_cache_ttl_secs`; `0` disables TTL reuse while keeping ETag revalidation. If the API quota is exhausted and no cached metadata exists, `scpr` resolves public releases through `github.com` and downloads assets directly, which does not consume REST API quota.
 
 Adjust CLI verbosity without setting `RUST_LOG` manually:
 
@@ -475,11 +487,12 @@ scpr completions fish
 
 ## Storage Layout
 
-By default `scpr` uses XDG config/data directories when available:
+By default `scpr` uses XDG config/data/cache directories when available:
 
 - binaries: `~/.local/bin`
 - man pages: `${XDG_DATA_HOME:-~/.local/share}/man/man1`
 - state file: `${XDG_DATA_HOME:-~/.local/share}/scpr/state.toml`
+- cached GitHub release metadata: `${XDG_CACHE_HOME:-~/.cache}/scpr/github-cache`
 - user plugin definitions: `${XDG_DATA_HOME:-~/.local/share}/scpr/plugins`
 - local development plugin definitions: `./plugins`
 
@@ -496,6 +509,7 @@ man_dir = "/home/alice/.local/share/man/man1"
 plugin_dirs = ["/home/alice/.config/scpr/plugins", "/opt/scpr/plugins"]
 index_ttl_secs = 600
 lock_stale_after_secs = 300
+github_cache_ttl_secs = 300
 ```
 
 ## Plugin Format

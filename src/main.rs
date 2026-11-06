@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::ArgMatches;
 use std::path::Path;
 use std::process;
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 mod cli_definition;
@@ -76,7 +77,11 @@ async fn run() -> Result<()> {
     let settings = settings::AppSettings::load()?;
     let force_refresh = matches.get_flag("refresh");
 
-    let client = github::GithubClient::new(PKG_VERSION)?;
+    let client = github::GithubClient::new(
+        PKG_VERSION,
+        Some(settings.github_cache_dir()),
+        Duration::from_secs(settings.github_cache_ttl_secs()),
+    )?;
     let installer = installer::Installer::new()?;
 
     match matches.subcommand() {
@@ -353,7 +358,7 @@ async fn run() -> Result<()> {
 
                 let (owner, repo_name) = parse_repo_arg(repo)?;
                 let metadata = client.get_repo_metadata(owner, repo_name).await?;
-                let release = client.get_latest_release(owner, repo_name).await?;
+                let release = client.get_latest_release_fresh(owner, repo_name).await?;
                 let scaffold =
                     plugin_scaffold::build_plugin_scaffold(repo, &metadata, &release)?;
                 if print_stdout {

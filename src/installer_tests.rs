@@ -1058,3 +1058,33 @@ fn test_audit_ignores_tracked_files_when_binary_is_missing() {
     assert!(matches!(audit[0].status, AuditStatus::Missing));
     assert_eq!(audit[0].detail, "Installed binary is missing");
 }
+
+#[test]
+fn test_synthesize_release_assets_builds_github_download_urls() {
+    let plugin = sample_plugin();
+    let target = "x86_64-unknown-linux-musl";
+    let asset_name = plugin.expand_template(&plugin.asset_pattern, "v15.1.0", target);
+
+    let assets = super::synthesize_release_assets(
+        &plugin,
+        "BurntSushi",
+        "ripgrep",
+        "v15.1.0",
+        target,
+        &asset_name,
+    );
+
+    assert_eq!(assets.len(), 2);
+    assert_eq!(assets[0].name, asset_name);
+    assert_eq!(
+        assets[0].browser_download_url,
+        format!(
+            "https://github.com/BurntSushi/ripgrep/releases/download/v15.1.0/{asset_name}"
+        )
+    );
+    assert!(
+        assets.iter().any(|asset| asset.name
+            == "ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz.sha256")
+    );
+    assert!(assets.iter().all(|asset| asset.digest.is_none()));
+}

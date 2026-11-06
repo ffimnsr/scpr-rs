@@ -718,7 +718,7 @@ pub(crate) async fn build_doctor_checks(
                 core.remaining, core.limit, core.reset
             ),
             remediation: (core.remaining < 10).then(|| {
-                "Export a valid GITHUB_TOKEN or wait for the GitHub API rate limit to reset before running large installs or updates.".to_string()
+                "Export a valid GITHUB_TOKEN or GH_TOKEN (for example `export GITHUB_TOKEN=\"$(gh auth token)\"`) or wait for the GitHub API rate limit to reset before running large installs or updates.".to_string()
             }),
         },
         Err(err) => DoctorCheck {
@@ -726,7 +726,7 @@ pub(crate) async fn build_doctor_checks(
             ok: false,
             detail: format!("Failed to query GitHub rate limit: {err}"),
             remediation: Some(
-                "Check network connectivity and GitHub authentication before relying on remote installs.".to_string(),
+                "Check network connectivity and GitHub authentication (GITHUB_TOKEN or GH_TOKEN) before relying on remote installs.".to_string(),
             ),
         },
     });
