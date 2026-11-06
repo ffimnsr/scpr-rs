@@ -40,6 +40,7 @@ Bundled plugins currently include:
 - `mk`
 - `midas`
 - `mdbook`
+- `supabase`
 - `sqlx` via `--build`
 
 ## Quick Start

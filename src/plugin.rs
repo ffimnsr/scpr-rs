@@ -772,6 +772,37 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_supabase_plugin_targets_and_asset() {
+        let plugin = parse("plugins/supabase.toml").unwrap();
+        assert_eq!(plugin.name, "supabase");
+        assert_eq!(plugin.location, "github:supabase/cli");
+        assert_eq!(plugin.asset_pattern, "supabase_{version}_{target}.tar.gz");
+        assert_eq!(
+            plugin.checksum_asset_pattern.as_deref(),
+            Some("checksums.txt")
+        );
+        assert_eq!(plugin.binary, "supabase");
+
+        assert_eq!(
+            plugin.expand_template(&plugin.asset_pattern, "v3.0.0", "linux_amd64"),
+            "supabase_3.0.0_linux_amd64.tar.gz"
+        );
+        assert_eq!(
+            plugin.resolve_target("linux", "x86_64"),
+            Some("linux_amd64".to_string())
+        );
+        assert_eq!(
+            plugin.resolve_target("macos", "aarch64"),
+            Some("darwin_arm64".to_string())
+        );
+        assert_eq!(
+            plugin.resolve_target("windows", "x86_64"),
+            Some("windows_amd64".to_string())
+        );
+        assert_eq!(plugin.resolve_target("freebsd", "x86_64"), None);
+    }
+
+    #[test]
     fn test_github_repo_parsing() {
         let plugin = parse("plugins/ripgrep.toml").unwrap();
         let (owner, repo) = plugin.github_repo().unwrap();
@@ -791,6 +822,7 @@ mod tests {
         assert!(plugins.iter().any(|plugin| plugin.name == "mdbook"));
         assert!(plugins.iter().any(|plugin| plugin.name == "scpr"));
         assert!(plugins.iter().any(|plugin| plugin.name == "sqlx"));
+        assert!(plugins.iter().any(|plugin| plugin.name == "supabase"));
         assert!(plugins.iter().any(|plugin| plugin.name == "tw-dl"));
     }
 
