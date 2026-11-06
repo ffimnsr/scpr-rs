@@ -28,14 +28,14 @@ pub(crate) fn build_cli(version: &'static str, description: &'static str) -> Com
         .global(true)
         .action(ArgAction::SetTrue)
         .conflicts_with("verbose")
-        .help("Reduce output to warnings and errors");
+        .help("Suppress warning and informational log output");
 
     let verbose_arg = Arg::new("verbose")
         .long("verbose")
         .short('v')
         .global(true)
         .action(ArgAction::Count)
-        .help("Increase output verbosity (-v for debug, -vv for trace)");
+        .help("Increase log verbosity (-v for warnings, -vv for info, -vvv for debug, -vvvv for trace)");
 
     let log_format_arg = Arg::new("log-format")
         .long("log-format")

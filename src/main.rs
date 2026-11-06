@@ -55,11 +55,13 @@ async fn run() -> Result<()> {
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         if matches.get_flag("quiet") {
-            EnvFilter::new("warn")
+            EnvFilter::new("error")
         } else {
             match matches.get_count("verbose") {
-                0 => EnvFilter::new("info"),
-                1 => EnvFilter::new("debug"),
+                0 => EnvFilter::new("error"),
+                1 => EnvFilter::new("warn"),
+                2 => EnvFilter::new("info"),
+                3 => EnvFilter::new("debug"),
                 _ => EnvFilter::new("trace"),
             }
         }
@@ -850,8 +852,8 @@ fn warn_duplicate_remote_plugins(
     manager: &remote_index::RemoteIndexManager,
 ) -> Result<()> {
     for (plugin_name, repos) in manager.duplicate_plugin_names()? {
-        eprintln!(
-            "warning: plugin '{}' exists in multiple enabled remote indexes: {}. Resolution still prefers the earliest index.",
+        tracing::warn!(
+            "plugin '{}' exists in multiple enabled remote indexes: {}. Resolution still prefers the earliest index.",
             plugin_name,
             repos.join(", ")
         );

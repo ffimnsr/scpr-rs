@@ -21,7 +21,7 @@ use std::{
 };
 use tar::Archive;
 use tempfile::NamedTempFile;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 const LOCK_RETRY_DELAY_MS: u64 = 100;
@@ -428,7 +428,7 @@ impl Installer {
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
 
-        info!(
+        println!(
             "Installing {} for {os}/{arch}{}…",
             plugin.name,
             if options.build { " from source" } else { "" }
@@ -445,7 +445,7 @@ impl Installer {
         } = if options.build {
             let build_ref =
                 resolve_build_ref(plugin, client, owner, repo, options.tag).await?;
-            info!("Using source ref: {}", build_ref.source_ref);
+            println!("Using source ref: {}", build_ref.source_ref);
 
             if !options.force
                 && self.same_version_already_installed(
@@ -489,7 +489,7 @@ impl Installer {
                 None => client.get_latest_release_fresh(owner, repo).await?,
             };
             let tag = release.tag_name;
-            info!("Using release: {tag}");
+            println!("Using release: {tag}");
 
             if !options.force
                 && self.same_version_already_installed(&plugin.name, &tag)?
@@ -553,7 +553,7 @@ impl Installer {
                     )
                 })?;
 
-            info!("Downloading {}…", asset.name);
+            println!("Downloading {}…", asset.name);
             let data = client
                 .download_asset(&asset.browser_download_url, asset.size)
                 .await?;
@@ -827,7 +827,7 @@ impl Installer {
         client: &GithubClient,
         request: BuildRequest<'_>,
     ) -> Result<(InstallPayload, Option<String>, Vec<ResolvedPluginFile>)> {
-        info!(
+        println!(
             "Downloading source archive for {}/{}@{}…",
             request.owner, request.repo, request.source_ref
         );
@@ -1084,16 +1084,16 @@ impl Installer {
             package.name == plugin.name && package.binary == binary_filename
         });
         if tracked || managed_path.exists() {
-            eprintln!(
-                "warning: '{}' currently resolves to '{}' instead of the scpr-managed path '{}'. Installing or updating '{}' may not change the binary your shell runs until PATH is reordered.",
+            warn!(
+                "'{}' currently resolves to '{}' instead of the scpr-managed path '{}'. Installing or updating '{}' may not change the binary your shell runs until PATH is reordered.",
                 binary_filename,
                 resolved_path.display(),
                 managed_path.display(),
                 plugin.name
             );
         } else {
-            eprintln!(
-                "warning: '{}' already exists on PATH at '{}' and is not managed by scpr. Installing '{}' into '{}' may not change the binary your shell runs until PATH is reordered.",
+            warn!(
+                "'{}' already exists on PATH at '{}' and is not managed by scpr. Installing '{}' into '{}' may not change the binary your shell runs until PATH is reordered.",
                 binary_filename,
                 resolved_path.display(),
                 plugin.name,

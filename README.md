@@ -378,6 +378,7 @@ Remote index notes:
 - `scpr` syncs plugin TOML files from `plugins/*.toml` in those repositories
 - remote index syncs are cached for 10 minutes by default; use `--refresh` to bypass the TTL
 - when the same plugin name exists in multiple indexes, the earlier index in `plugins index list` wins
+- local plugin directories (including the current checkout's `plugins/`) always take precedence over remote indexes, which act as a fallback
 - use `plugins index promote` and `plugins index demote` to change precedence without removing an index
 - use `plugins index pin <plugin> <owner>/<repo>` to make one plugin prefer a specific remote index
 - plugin source pins are respected by install, update, uninstall, `plugins info`, `outdated`, and `update --all`
@@ -460,14 +461,17 @@ export GITHUB_TOKEN="$(gh auth token)"   # or a fine-grained personal access tok
 
 `scpr` caches GitHub release metadata under `${XDG_CACHE_HOME:-~/.cache}/scpr/github-cache`. Cached entries are reused for 5 minutes by default and revalidated with ETags afterwards, so unchanged releases cost no API quota. `scpr install` always revalidates the latest release instead of trusting a warm cache, so a new release is picked up immediately. Override the TTL with `SCPR_GITHUB_CACHE_TTL_SECS` or `github_cache_ttl_secs`; `0` disables TTL reuse while keeping ETag revalidation. If the API quota is exhausted and no cached metadata exists, `scpr` resolves public releases through `github.com` and downloads assets directly, which does not consume REST API quota.
 
-Adjust CLI verbosity without setting `RUST_LOG` manually:
+Adjust CLI verbosity without setting `RUST_LOG` manually. Normal command output is printed directly; diagnostic logs are off by default:
 
 ```bash
-scpr -q list
-scpr -v install ripgrep
-scpr -vv plugins list
-scpr --log-format json -v update --all
+scpr list             # plain command output only
+scpr -v list          # warnings
+scpr -vv list         # informational logs
+scpr -vvv plugins list  # debug logs
+scpr -vvvv plugins list # trace logs
 ```
+
+`RUST_LOG` still overrides these defaults when set.
 
 Export or restore state when moving to a new machine:
 

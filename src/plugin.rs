@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use tracing::debug;
+use tracing::{debug, warn};
 use walkdir::{DirEntry, WalkDir};
 
 static EMITTED_PLUGIN_WARNINGS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -636,7 +636,7 @@ fn format_shadowed_plugin_warning(
     };
 
     format!(
-        "warning: {} {} from '{}' are ignored because an earlier plugin directory takes precedence: '{}'.\n  Shadowed: {}\n  Hint: reorder plugin directories, remove the remote index, or use --plugins-dir if you want local plugins to win.",
+        "{} {} from '{}' are ignored because an earlier plugin directory takes precedence: '{}'.\n  Shadowed: {}\n  Hint: reorder plugin directories, remove the remote index, or use --plugins-dir if you want local plugins to win.",
         plugin_names.len(),
         plugin_label,
         current_dir,
@@ -648,12 +648,12 @@ fn format_shadowed_plugin_warning(
 fn emit_warning_once(message: &str) {
     let emitted = EMITTED_PLUGIN_WARNINGS.get_or_init(|| Mutex::new(HashSet::new()));
     let Ok(mut emitted) = emitted.lock() else {
-        eprintln!("{message}");
+        warn!("{message}");
         return;
     };
 
     if emitted.insert(message.to_string()) {
-        eprintln!("{message}");
+        warn!("{message}");
     }
 }
 

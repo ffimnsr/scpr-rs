@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::{fs, process};
-use tracing::{info, warn};
+use tracing::warn;
 
 pub(crate) async fn resolve_expected_sha256(
     plugin: &Plugin,
@@ -44,7 +44,7 @@ pub(crate) async fn resolve_expected_sha256(
             )
         })?;
 
-    info!("Downloading checksum {}…", checksum_asset.name);
+    println!("Downloading checksum {}…", checksum_asset.name);
     let checksum_data = client
         .download_asset(&checksum_asset.browser_download_url, checksum_asset.size)
         .await?;
@@ -83,7 +83,7 @@ pub(crate) async fn verify_signature_if_configured(
             )
         })?;
 
-    info!("Downloading signature {}…", signature_asset.name);
+    println!("Downloading signature {}…", signature_asset.name);
     let signature_data = client
         .download_asset(&signature_asset.browser_download_url, signature_asset.size)
         .await?;
@@ -104,7 +104,7 @@ pub(crate) fn verify_sha256(data: &[u8], expected_sha256: &str) -> Result<()> {
             "SHA-256 mismatch: expected {expected_sha256}, got {actual}"
         ));
     }
-    info!("Verified SHA-256: {actual}");
+    println!("Verified SHA-256: {actual}");
     Ok(())
 }
 
@@ -216,7 +216,7 @@ fn verify_gpg_signature(asset_path: &Path, signature_path: &Path) -> Result<()> 
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    info!("Verified GPG signature");
+    println!("Verified GPG signature");
     Ok(())
 }
 
@@ -247,7 +247,7 @@ fn verify_minisign_signature(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    info!("Verified minisign signature");
+    println!("Verified minisign signature");
     Ok(())
 }
 

@@ -7,6 +7,10 @@ tasks:
     commands:
       - cargo install --path .
     description: Install the crate.
+  install-local:
+    commands:
+      - cargo install --path . --root "$HOME/.local" --force
+    description: Install the binary into ~/.local/bin.
   lint:
     commands:
       - cargo clippy --all-targets --all-features -- -D warnings

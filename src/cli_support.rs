@@ -93,10 +93,13 @@ pub(crate) async fn resolved_plugin_dirs(
         .sync_all(client, settings.index_ttl_secs(), force_refresh)
         .await?;
     if !remote_dirs.is_empty() {
-        let insert_at = usize::from(extra.is_some()) + 1;
-        for (offset, dir) in remote_dirs.into_iter().enumerate() {
-            dirs.insert(insert_at + offset, dir.to_string_lossy().to_string());
-        }
+        // Remote indexes act as a fallback: local plugin directories, including
+        // the current checkout's ./plugins, always take precedence.
+        dirs.extend(
+            remote_dirs
+                .into_iter()
+                .map(|dir| dir.to_string_lossy().to_string()),
+        );
     }
 
     plugin::emit_shadowed_plugin_warnings(&dirs)?;

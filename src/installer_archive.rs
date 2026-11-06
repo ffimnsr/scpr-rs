@@ -15,7 +15,7 @@ use std::{
 };
 use tar::Archive;
 use tempfile::NamedTempFile;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use xz2::read::XzDecoder;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
@@ -250,7 +250,7 @@ pub(crate) fn commit_install(
                 match staged_file.kind {
                     StagedKind::Binary => {}
                     StagedKind::ManPage { filename } => {
-                        info!("Installed man page → {}", staged_file.dest.display());
+                        println!("Installed man page → {}", staged_file.dest.display());
                         man_page_filenames.push(filename);
                     }
                     StagedKind::File {
