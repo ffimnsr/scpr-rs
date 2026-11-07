@@ -446,7 +446,9 @@ pub(crate) async fn collect_outdated_packages_report(
                 let _permit = sem.acquire().await.ok()?;
                 let manager = match remote_index::RemoteIndexManager::new() {
                     Ok(manager) => manager,
-                    Err(err) => return Some(Err((installed.name, err.to_string()))),
+                    Err(err) => {
+                        return Some(Err((installed.name, format!("{err:#}"))));
+                    }
                 };
                 let mut package_dirs = dirs;
                 if let Err(err) = apply_preferred_remote_pin_to_dirs(
@@ -455,11 +457,13 @@ pub(crate) async fn collect_outdated_packages_report(
                     &installed.name,
                     false,
                 ) {
-                    return Some(Err((installed.name, err.to_string())));
+                    return Some(Err((installed.name, format!("{err:#}"))));
                 }
                 let plugin = match plugin::find_plugin(&installed.name, &package_dirs) {
                     Ok(p) => p,
-                    Err(err) => return Some(Err((installed.name, err.to_string()))),
+                    Err(err) => {
+                        return Some(Err((installed.name, format!("{err:#}"))));
+                    }
                 };
                 let Some((owner, repo)) = plugin.github_repo() else {
                     return Some(Err((
@@ -472,7 +476,9 @@ pub(crate) async fn collect_outdated_packages_report(
                 };
                 let release = match client.get_latest_release(owner, repo).await {
                     Ok(release) => release,
-                    Err(err) => return Some(Err((installed.name, err.to_string()))),
+                    Err(err) => {
+                        return Some(Err((installed.name, format!("{err:#}"))));
+                    }
                 };
                 if release.tag_name != installed.version {
                     Some(Ok(OutdatedPackage {

@@ -14,7 +14,7 @@ use std::{
     process,
 };
 use tar::Archive;
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempPath};
 use tracing::{debug, warn};
 use xz2::read::XzDecoder;
 use zstd::stream::read::Decoder as ZstdDecoder;
@@ -77,7 +77,7 @@ impl InstallRoots<'_> {
 
 struct StagedFile {
     dest: PathBuf,
-    temp: NamedTempFile,
+    temp: TempPath,
     kind: StagedKind,
 }
 
@@ -590,7 +590,7 @@ fn stage_file(
     dest: &Path,
     contents: &[u8],
     executable: bool,
-) -> Result<NamedTempFile> {
+) -> Result<TempPath> {
     let mut temp = NamedTempFile::new_in(dest_dir).with_context(|| {
         format!("Failed to create temp file in {}", dest_dir.display())
     })?;
@@ -616,7 +616,7 @@ fn stage_file(
         })?;
     }
 
-    Ok(temp)
+    Ok(temp.into_temp_path())
 }
 
 fn host_executable_name(filename: &str) -> String {

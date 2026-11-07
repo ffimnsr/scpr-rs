@@ -110,7 +110,7 @@ pub(crate) async fn run(
                     eprintln!(
                         "Progress: {completed}/{package_count} complete ({name}: failed)"
                     );
-                    update_failures.push((name, err.to_string()));
+                    update_failures.push((name, format!("{err:#}")));
                 }
             }
         }

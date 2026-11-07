@@ -338,3 +338,31 @@ fn test_commit_install_rejects_duplicate_file_destinations() {
     );
     assert!(!data_home.join("pkg/data.json").exists());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_stage_file_closes_descriptors_between_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let fd_count = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+    let before = fd_count();
+
+    let mut staged = Vec::new();
+    for index in 0..64 {
+        let dest = dir.path().join(format!("file-{index}"));
+        staged.push(stage_file(dir.path(), &dest, b"contents", false).unwrap());
+    }
+
+    let after = fd_count();
+    assert!(
+        after <= before + 4,
+        "staging {} files left {} extra descriptors open",
+        staged.len(),
+        after.saturating_sub(before)
+    );
+
+    for (index, temp) in staged.into_iter().enumerate() {
+        let dest = dir.path().join(format!("file-{index}"));
+        temp.persist(&dest).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "contents");
+    }
+}
